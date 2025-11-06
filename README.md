@@ -16,7 +16,7 @@ Analyses include:
 
 ---
 
-## 🚧 Work in progress
+## Work in progress
 
 This project is **currently under active development**.  
 New scripts, analyses, and reports will be added as progress continues.
