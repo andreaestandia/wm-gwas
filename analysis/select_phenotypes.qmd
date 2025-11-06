@@ -1,0 +1,31 @@
+---
+title: "select_phenotypes"
+author: "Andrea Estandia"
+date: "06/10/2025"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+# Knitr settings: 
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+options(scipen = 999)
+```
+
+```{r}
+source("./src/wm-gwas_source.R")
+```
+
+Read data
+```{r}
+samples <- read.csv(file.path(data_path, "dfs", "samples.csv"))
+
+phenotypes <- read.csv(file.path(data_path, "dfs", "gwas_hatch_checks.csv")) %>%
+dplyr::select(egg_id, hatch_date)
+```
+
+```{r}
+
+```
