@@ -1,0 +1,26 @@
+PLINK v2.00a2.3LM 64-bit Intel (24 Jan 2020)
+Options in effect:
+  --allow-extra-chr
+  --bfile wm-gwas.pruned
+  --make-rel square
+  --not-chr chrZ
+  --out output/relatedness
+
+Hostname: htc-g048
+Working directory: /data/biol-gt-genomics/sjoh4959/wm-gwas/data/genotype_calling
+Start time: Fri Nov  7 11:43:23 2025
+
+Random number seed: 1762515803
+515350 MiB RAM detected; reserving 257675 MiB for main workspace.
+Using up to 40 threads (change this with --threads).
+344 samples (0 females, 0 males, 344 ambiguous; 344 founders) loaded from
+wm-gwas.pruned.fam.
+2025870 out of 2079501 variants loaded from wm-gwas.pruned.bim.
+Note: No phenotype data present.
+Calculating allele frequencies... done.
+Constructing GRM: done.
+Correcting for missingness... done.
+--make-rel: GRM written to output/relatedness.rel , and IDs to
+output/relatedness.rel.id .
+
+End time: Fri Nov  7 11:44:08 2025
