@@ -23,9 +23,46 @@ Read data
 samples <- read.csv(file.path(data_path, "dfs", "samples.csv"))
 
 phenotypes <- read.csv(file.path(data_path, "dfs", "gwas_hatch_checks.csv")) %>%
-dplyr::select(egg_id, hatch_date)
+  dplyr::select(egg_id, hatch_date) 
+
+vcf_order <- read.csv(file.path(data_path, "dfs","vcf_order.csv"), header=F) %>%
+  rename(IID=V1)
 ```
 
+Join data
 ```{r}
+phenotypes_clean <- phenotypes %>%
+  filter(egg_id %in% samples$IID) %>%
+  rename(IID = egg_id) %>%
+  mutate(
+    FID = sub("_.*", "", IID),                              
+    hatch_date = as.numeric(difftime(dmy(hatch_date),
+                                     as.Date("2025-03-20"),
+                                     units = "days"))
+  ) %>%
+  select(FID, IID, hatch_date) 
+```
 
+Sort df by vcf order
+```{r}
+id_col <- names(vcf_order)[grepl("iid|id|sample", names(vcf_order), ignore.case = TRUE)][1]
+
+vcf_ids <- as.character(vcf_order[[id_col]])
+vcf_index <- tibble::tibble(IID = vcf_ids, .vcf_order = seq_along(vcf_ids))
+
+phenotypes_clean <- phenotypes_clean %>%
+  dplyr::mutate(IID = as.character(IID)) %>%
+  dplyr::inner_join(vcf_index, by = "IID") %>%   # keeps only samples present in vcf_order
+  dplyr::arrange(.vcf_order) %>%
+  dplyr::select(-.vcf_order)
+```
+
+Write out
+```{r}
+write.table(
+  phenotypes_clean,
+  file.path(data_path, "dfs", "pheno.txt"),
+  row.names = FALSE,
+  quote = FALSE
+)
 ```

@@ -1,0 +1,190 @@
+---
+title: "multiple_paternity"
+author: "Andrea Estandia"
+date: "06/10/2025"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+# Knitr settings: 
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+options(scipen = 999)
+```
+
+```{r}
+source("./src/wm-gwas_source.R")
+```
+
+```{r}
+pi_hat <- read.table(file.path(reports_path, "ibd", "wm-gwas.genome.genome"), header=T) %>%
+    mutate(id1_id2=paste0(IID2, "_", IID1)) %>% select(-FID1, -FID2, -IID1, -IID2)
+kin <- read.table(file.path(reports_path, "kinship", "wwm-gwas.king.kin0"), header=T) %>%
+    mutate(id1_id2=paste0(IID1, "_", IID2))
+
+full_df <- pi_hat %>%
+  left_join(kin, by = "id1_id2") %>%
+  mutate(
+    FID1 = sub("_.*", "", IID1),
+    FID2 = sub("_.*", "", IID2)
+  ) %>%
+   mutate(
+    RT = ifelse(FID1 == FID2, "FS", "OT")
+  ) 
+```
+
+```{r}
+full_df <- full_df %>%
+  mutate(
+    # Classify based on actual genetic relatedness, ignoring the RT column
+    true_relationship = case_when(
+      # Full siblings: KINSHIP ~0.25, PI_HAT ~0.50
+      KINSHIP > 0.177 ~ "Full Sibling",
+      
+      # Half siblings: KINSHIP ~0.125, PI_HAT ~0.25
+      KINSHIP >= 0.0884 & KINSHIP <= 0.177 ~ "Half Sibling",
+      
+      # 2nd degree relatives (avuncular, grandparent, etc.)
+      KINSHIP >= 0.04 & KINSHIP < 0.08 ~ "2nd Degree",
+      
+      # 3rd degree relatives (first cousins)
+      KINSHIP >= 0.02 & KINSHIP < 0.04 ~ "3rd Degree",
+      
+      # Unrelated or very distant
+      KINSHIP < 0.02 ~ "Unrelated",
+      
+      # Ambiguous cases
+      TRUE ~ "Ambiguous"
+    )
+  )
+
+# Summary of all relationships found
+full_df %>% 
+  group_by(true_relationship) %>%
+  summarise(
+    n = n(),
+    mean_KINSHIP = mean(KINSHIP, na.rm=TRUE),
+    mean_PI_HAT = mean(PI_HAT, na.rm=TRUE),
+    mean_Z0 = mean(Z0, na.rm=TRUE),
+    mean_Z1 = mean(Z1, na.rm=TRUE),
+    mean_Z2 = mean(Z2, na.rm=TRUE),
+    mean_IBS0 = mean(IBS0, na.rm=TRUE)
+  ) %>%
+  arrange(desc(mean_KINSHIP))
+
+# View the identified siblings (full and half)
+full_df %>% 
+  filter(true_relationship %in% c("Full Sibling", "Half Sibling")) %>%
+  select(id1_id2, true_relationship, Z0, Z1, Z2, PI_HAT, IBS0, KINSHIP) %>%
+  arrange(desc(KINSHIP))
+
+full_df %>%
+  ggplot(aes(x=IBS0, y=KINSHIP, col=true_relationship))+
+  geom_point()
+```
+
+```{r}
+library(igraph)
+
+# Step 1: Identify all sibling pairs (full or half) within each family
+sibling_pairs <- full_df %>%
+  filter(
+    FID1 == FID2 &  # Same family
+    KINSHIP >= 0.08 &  # At least half-siblings
+    PI_HAT >= 0.17
+  ) %>%
+  mutate(
+    sib_type = case_when(
+      KINSHIP > 0.177 & PI_HAT > 0.35 ~ "Full",
+      KINSHIP >= 0.08 & KINSHIP <= 0.177 & Z0 >= 0.35 & Z2 < 0.15 ~ "Half",
+      TRUE ~ "Uncertain"
+    )
+  ) %>%
+  select(FID1, IID1, IID2, sib_type, Z0, Z1, Z2, PI_HAT, IBS0, KINSHIP)
+
+# Step 2: Function to infer number of fathers per family
+infer_paternity_groups <- function(family_id, sibling_data) {
+  
+  family_pairs <- sibling_data %>% filter(FID1 == family_id)
+  
+  if(nrow(family_pairs) == 0) return(NULL)
+  
+  # Get all individuals in this family
+  all_indivs <- unique(c(family_pairs$IID1, family_pairs$IID2))
+  
+  # Create a graph where edges connect full siblings only
+  full_sib_edges <- family_pairs %>%
+    filter(sib_type == "Full") %>%
+    select(IID1, IID2)
+  
+  if(nrow(full_sib_edges) == 0) {
+    # No full siblings, so each individual could have different father
+    return(data.frame(
+      FID = family_id,
+      n_individuals = length(all_indivs),
+      n_paternity_groups = length(all_indivs),  # Maximum possible
+      interpretation = "No full sibling pairs - likely all different fathers or insufficient data"
+    ))
+  }
+  
+  # Create graph of full siblings
+  g <- graph_from_data_frame(full_sib_edges, directed = FALSE, vertices = all_indivs)
+  
+  # Find connected components (each component shares a father)
+  clusters <- components(g)
+  
+  return(data.frame(
+    FID = family_id,
+    n_individuals = length(all_indivs),
+    n_paternity_groups = clusters$no,
+    interpretation = paste0(clusters$no, " father(s) detected")
+  ))
+}
+
+# Step 3: Apply to all families with siblings
+families_to_check <- unique(sibling_pairs$FID1)
+
+paternity_results <- lapply(families_to_check, function(fam) {
+  infer_paternity_groups(fam, sibling_pairs)
+}) %>%
+  bind_rows() %>%
+  arrange(desc(n_paternity_groups))
+
+# View results
+paternity_results
+
+# Detailed view for families with multiple fathers
+families_multiple_fathers <- paternity_results %>%
+  filter(n_paternity_groups > 1) %>%
+  pull(FID)
+
+# For each family with multiple fathers, show the full structure
+for(fam in families_multiple_fathers) {
+  cat("\n=== Family:", fam, "===\n")
+  
+  fam_pairs <- sibling_pairs %>%
+    filter(FID1 == fam) %>%
+    arrange(desc(KINSHIP))
+  
+  print(fam_pairs)
+  
+  # Show paternity groups
+  full_sib_edges <- fam_pairs %>%
+    filter(sib_type == "Full") %>%
+    select(IID1, IID2)
+  
+  if(nrow(full_sib_edges) > 0) {
+    all_indivs <- unique(c(fam_pairs$IID1, fam_pairs$IID2))
+    g <- graph_from_data_frame(full_sib_edges, directed = FALSE, vertices = all_indivs)
+    clusters <- components(g)
+    
+    cat("\nPaternity groups:\n")
+    for(i in 1:clusters$no) {
+      group_members <- names(clusters$membership[clusters$membership == i])
+      cat("Group", i, ":", paste(group_members, collapse = ", "), "\n")
+    }
+  }
+}
+```
