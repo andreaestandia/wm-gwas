@@ -78,3 +78,17 @@ plink2 --bfile wm-gwas.pruned \
   -bslmm 1 \
   -p "${PHENO_PATH}pheno_gemma.txt" \
   -o wm-gwas_bslmm.gemma
+
+
+${GEMMA_PATH}gemma" \
+  -bfile wm-gwas.pruned \
+  -gk 1 \
+  -p "${PHENO_PATH}pheno_gemma.txt" \
+  -o wm-gwas.relatedness 
+
+"${GEMMA_PATH}gemma" \
+  -bfile  wm-gwas.qc \
+  -k output/wm-gwas.relatedness1.cXX.txt \
+  -lmm 4 \
+  -p "${PHENO_PATH}pheno_gemma.txt" \
+  -o wm-gwas.gemma1

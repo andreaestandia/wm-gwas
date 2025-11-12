@@ -32,11 +32,13 @@ bcftools annotate -x ID -I +'%CHROM\_%POS' wm-gwas_tmp.vcf.gz -Oz -o wm-gwas.vcf
 # convert to plink2 pgen (or make-bed)
 plink2 --vcf wm-gwas.vcf.gz \
     --make-bed \
-    --out wm-gwas
+    --out wm-gwas \
+    --allow-extra-chr
 
 # apply MAF & missingness filters. MAF 0.05 because sample size is small
-plink2 --bfile wm-gwas \
-  --maf 0.05 \
-  --geno 0.3 \
-  --mind 0.1 \
-  --make-bed --out wm-gwas.qc
+plink2 --allow-extra-chr \
+       --bfile wm-gwas \
+       --geno 0.3 \
+       --maf 0.05 \
+       --make-bed \
+       --out wm-gwas.qc

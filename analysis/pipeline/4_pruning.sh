@@ -20,10 +20,12 @@ cd $PATH_GT
 # generate pruned SNP list
 plink2 --bfile wm-gwas.qc \
     --indep-pairwise 50 5 0.2 \
+    --allow-extra-chr \
     --out wm-gwas.prune
 
 # keep pruned SNPs
 plink2 --bfile wm-gwas.qc \
     --extract wm-gwas.prune.prune.in \
     --make-bed \
+    --allow-extra-chr \
     --out wm-gwas.pruned
