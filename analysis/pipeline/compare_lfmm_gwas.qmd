@@ -1,0 +1,97 @@
+---
+title: "compare_lfmm_gwas"
+author: "Andrea Estandia"
+date: "25/11/2025"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+# Knitr settings: 
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+options(scipen = 999)
+```
+
+```{r}
+source("./src/wm-gwas_source.R")
+```
+
+```{r}
+# Get all RDS files in the directory
+files <- list.files(file.path(reports_path, "lfmm"), pattern = "\\.rds$", full.names = TRUE)
+
+# Read each file and store in a list
+lfmm_list <- lapply(files, readRDS)
+
+# Optional: print names
+names(lfmm_list) <- basename(files)
+
+vars <- names(lfmm_list[[1]])
+vars
+
+lfmm_by_variable <- list()
+
+for (v in vars) {
+  lfmm_by_variable[[v]] <- do.call(rbind, lapply(lfmm_list, function(x) x[[v]]))
+}
+
+lfmm_by_variable <- lapply(lfmm_by_variable, function(df) {
+  df %>%
+    mutate(
+      chr        = paste0("chr", sub(":.*", "", snp_id)),           # extract before ":"
+      position   = sub(".*:(\\d+)_.*", "\\1", snp_id),              # extract position
+      chr_position = paste0(chr, "_", position)                     # combine
+    )
+})
+
+lfmm_outliers <- list()
+
+for (v in names(lfmm_by_variable)) {
+  
+  df <- lfmm_by_variable[[v]]
+  
+  if (!"qvalue" %in% colnames(df)) {
+    stop(paste("No qvalue column in", v))
+  }
+  
+  lfmm_outliers[[v]] <- df %>% 
+    mutate(rs = rownames(df)) %>%  
+    filter(qvalue <10e-8)        
+}
+
+```
+
+```{r}
+assoc <- data.table::fread(file.path(reports_path, "gwas", "wm-gwas_GLs.assoc.txt"))
+
+assoc$n <- 1:nrow(assoc)
+```
+
+```{r}
+assoc2 <- assoc %>%
+  mutate(
+    chr = str_extract(rs, "^chr[0-9XY]+"),                 
+    position = str_extract(rs, "(?<=_)[0-9]+"),            
+    chr_position = paste0(chr, "_", position),
+    n = row_number()
+  )
+
+gwas_outliers <- assoc2 %>% 
+    filter(p_score < 1e-8)
+
+```
+
+```{r}
+shared_outliers <- list()
+
+for (v in names(lfmm_outliers)) {
+  
+  shared <- lfmm_outliers[[v]] %>%
+    inner_join(gwas_outliers, by = "rs")  
+  
+  shared_outliers[[v]] <- shared
+}
+
+```
