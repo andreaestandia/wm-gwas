@@ -54,7 +54,8 @@ phenotypes_clean <- phenotypes_clean %>%
   dplyr::mutate(IID = as.character(IID)) %>%
   dplyr::inner_join(vcf_index, by = "IID") %>%   # keeps only samples present in vcf_order
   dplyr::arrange(.vcf_order) %>%
-  dplyr::select(-.vcf_order)
+  dplyr::select(-.vcf_order) %>%
+  mutate(hatch_date_std = scale(hatch_date)[,1])
 ```
 
 Write out
@@ -63,6 +64,72 @@ write.table(
   phenotypes_clean,
   file.path(data_path, "dfs", "pheno.txt"),
   row.names = FALSE,
+  quote = FALSE
+)
+```
+
+Subset phenotypes by getting the closest to the median by family
+```{r}
+phenotypes_subset <- phenotypes_clean %>%
+  group_by(FID) %>%
+  mutate(median_hatch = median(hatch_date, na.rm = TRUE)) %>%
+  slice_min(abs(hatch_date - median_hatch), n = 1) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(FID, IID, hatch_date)
+
+# write pheno in same order as .fam (no header)
+write.table(
+  phenotypes_subset,
+  file.path(data_path, "dfs", "pheno_subset.txt"),
+  row.names = FALSE,
+  quote = FALSE
+)
+
+```
+
+Obtain a phenotype from the residuals (how much they deviate from their family mean)
+```{r}
+# Fit covariates + family fixed
+fit <- lm(hatch_date ~ 1 + factor(FID), data = phenotypes_clean)  # include your covariates
+phenotypes_clean$resid <- resid(fit)
+
+# Save residuals in GCTA pheno format: FID IID phenotype
+write.table(
+  phenotypes_clean,
+  file.path(data_path, "dfs", "pheno_resid.txt"),
+  row.names = FALSE,
+  quote = FALSE
+)
+
+
+```
+
+Create a dummy phenotype file
+```{r}
+phenotypes_dummy <- phenotypes_clean %>%
+  mutate(dummy = round(pmin(pmax(rnorm(nrow(phenotypes_clean), mean = 17.5, sd = 7), 0), 35))) #%>% 
+  #select(FID, IID, dummy)
+
+write.table(
+  phenotypes_dummy,
+  file.path(data_path, "dfs", "pheno_dummy.txt"),
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+Set family as a covariate for GEMMA
+```{r}
+covariates <- phenotypes_clean %>%
+  mutate(covar = as.numeric(as.factor(FID))) %>%
+  select(covar)
+
+write.table(
+  covariates,
+  file.path(data_path, "dfs", "covariates.txt"),
+  row.names = FALSE,
+  col.names = FALSE,
   quote = FALSE
 )
 ```

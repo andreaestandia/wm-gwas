@@ -19,13 +19,245 @@ source("./src/wm-gwas_source.R")
 ```
 
 ```{r}
-manhattan <- read.table("/Users/sjoh4959/wm-gwas_bslmm.gemma.param.txt", header=T)
+assoc <- data.table::fread(file.path(reports_path, "gwas", "wm-gwas_GLs.assoc.txt"))
 
-manhattan$n <- 1:nrow(manhattan)
+assoc$n <- 1:nrow(assoc)
 ```
 
 ```{r}
-manhattan %>%
-    ggplot(aes(y=-log10(1-gamma), x=n))+
-    geom_point()
+assoc2 <- assoc %>%
+  mutate(
+    chr = str_extract(rs, "^[^_:\\s]+"),   # first chunk e.g. "chr1"
+    n   = row_number(),
+    p_score_safe = pmax(p_score, 1e-300)
+  )
+
 ```
+
+```{r}
+# recompute bonf 
+bonf <- -log10(0.00005 / nrow(assoc2))
+
+# prepare plot_df (only points above threshold)
+plot_df <- assoc2 %>%
+  mutate(chr = ifelse(is.na(chr) | chr == "", str_extract(rs, "^[^_:\\s]+"), chr)) %>%
+  filter(-log10(p_score_safe) > 1) %>%
+  mutate(
+    n = as.integer(n),                            # ensure numeric
+    chr = factor(chr, levels = unique(chr)),      # keep encountered order
+    chr_idx = as.integer(chr),
+    point_col = ifelse(chr_idx %% 2 == 1, "#5a798f", "#2a3740")
+  )
+
+# build axisdf: midpoint for each chr on the numeric n scale
+axisdf <- plot_df %>%
+  group_by(chr) %>%
+  summarize(x = (min(n) + max(n)) / 2) %>%
+  ungroup()
+
+# final plot: x = n (numeric), with custom breaks/labels from axisdf
+manhattan_plot <-
+ggplot(plot_df, aes(x = n, y = -log10(p_score_safe))) +
+  geom_jitter(aes(color = point_col), width = 0.18, height = 0, size = 1.8, show.legend = FALSE) +
+  geom_hline(yintercept = bonf, linetype = "dashed") +
+  scale_color_identity() +
+  scale_x_continuous(breaks = axisdf$x, labels = axisdf$chr, expand = expansion(mult = c(0.01, 0.01))) +
+  labs(x = " ", y = expression(-log[10](p[score]))) +
+  theme_minimal(base_family = "roboto_condensed") +
+  theme(
+    panel.grid = element_blank(),                      # remove grid entirely
+    axis.text.x = element_text(hjust = 1, family = "roboto_condensed"),
+    axis.title = element_text(family = "roboto_condensed"),
+    legend.position = "none"
+  )
+
+ggsave(manhattan_plot,
+      filename=file.path(figures_path, "manhattan_plot_GLs.png"),
+      width=12,
+      height=3)
+```
+
+```{r}
+assoc2 %>%
+  slice_max(order_by = -log10(p_score), n = 100) %>%
+  filter(chr=="chr10") %>%
+  arrange(n)
+
+```
+
+
+```{r}
+# prepare p-values (avoid 0)
+qq_df <- assoc2 %>%
+  mutate(pval = pmax(p_score_safe, 1e-300)) %>%
+  arrange(pval) %>%
+  mutate(
+    observed = -log10(pval),
+    expected = -log10(ppoints(n()))   # expected under Uniform(0,1)
+  )
+
+# make QQ plot
+qq_plot <- ggplot(qq_df, aes(x = expected, y = observed)) +
+  geom_point(size = 1.5, colour = "#5a798f") +
+  geom_abline(intercept = 0, slope = 1, colour = "#2a3740", linetype = "dashed") +
+  labs(
+    x = expression(Expected~~-log[10](italic(p))),
+    y = expression(Observed~~-log[10](italic(p))),
+    title = "QQ Plot of P-values"
+  ) +
+  theme_minimal(base_family = "roboto_condensed") +
+  theme(
+    panel.grid = element_blank(),
+    plot.title = element_text(hjust = 0.5, family = "roboto_condensed")
+  )
+
+ggsave(qq_plot,
+      filename=file.path(figures_path, "qq_plot.png"),
+      width=7,
+      height=7)
+```
+
+Bayesian sparsed linear mixed model to check for major effect loci. Plot only non-zero effect loci.
+```{r}
+# Load hyperparameter file
+hyp.params<-data.table::fread(file.path(reports_path, "gwas", "bslmm.hyp.txt"))
+
+# Get mean, median, and 95% ETPI of hyperparameters
+# pve -> proportion of phenotypic variance explained by the genotypes
+pve<-c("PVE", mean(hyp.params$pve),quantile(hyp.params$pve, probs=c(0.5,0.025,0.975)))
+
+# pge -> proportion of genetic variance explained by major effect loci
+pge<-c("PGE",mean(hyp.params$pge),quantile(hyp.params$pge, probs=c(0.5,0.025,0.975)))
+
+# pi -> proportion of variants with non-zero effects
+pi<-c("pi",mean(hyp.params$pi),quantile(hyp.params$pi, probs=c(0.5,0.025,0.975)))
+
+# n.gamma -> number of variants with major effect
+n.gamma<-c("n.gamma",mean(hyp.params$n_gamma),quantile(hyp.params$n_gamma, probs=c(0.5,0.025,0.975)))
+
+# get table of hyperparameters
+hyp.params.table<-as.data.frame(rbind(pve,pge,pi,n.gamma),row.names=F)
+colnames(hyp.params.table)<-c("hyperparam", "mean","median","2.5%", "97.5%")
+
+# write table to file
+write.table(hyp.params.table, 
+            file=file.path(reports_path, 
+            "gwas", 
+            "hyperparameters.dsv"), 
+            sep="\t", 
+            quote=F)
+
+
+```
+
+Visualise explained variance
+```{r}
+# PVE
+# ------------------------------------------------------------------------------
+plot(hyp.params$pve, type="l", ylab="PVE", main="PVE - trace")
+hist(hyp.params$pve, main="PVE - posterior distribution", xlab="PVE")
+plot(density(hyp.params$pve), main="PVE - posterior distribution", xlab="PVE")
+# ------------------------------------------------------------------------------
+```
+
+
+```{r}
+params<-data.table::fread(file.path(reports_path, "gwas", "bslmm.param.txt"))
+
+# Get variants with sparse effect size on phenotypes 
+# add sparse effect size (= beta * gamma) to data frame
+params$"eff"<-abs(params$beta*params$gamma)
+
+# get variants with effect size > 0
+params.effects<-params[params$eff>0,]
+
+# show number of variants with measurable effect
+nrow(params.effects)
+
+# sort by descending effect size
+params.effects.sort<-params.effects[order(-params.effects$eff),]
+
+# show top 10 variants with highest effect
+head(params.effects.sort, 10) 
+
+# variants with the highest sparse effects
+# ------------------------------------------------------------------------------
+# top 1% variants (above 99% quantile)
+top1<-params.effects.sort[params.effects.sort$eff>quantile(params.effects.sort$eff,0.99),]
+# top 0.1% variants (above 99.9% quantile)
+top01<-params.effects.sort[params.effects.sort$eff>quantile(params.effects.sort$eff,0.999),]
+# top 0.01% variants (above 99.99% quantile)
+top001<-params.effects.sort[params.effects.sort$eff>quantile(params.effects.sort$eff,0.9999),]
+# ------------------------------------------------------------------------------
+
+# ==============================================================================
+# Get variants with high Posterior Inclusion Probability (PIP) == gamma
+# ==============================================================================
+# PIP is the frequency a variant is estimated to have a sparse effect in the MCMC
+
+# sort variants by descending PIP
+params.pipsort<-params[order(-params$gamma),]
+
+# Show top 10 variants with highest PIP
+head(params.pipsort,10)
+
+# preferred chromosome order (change or extend if you need X/Y/MT etc.)
+chr_order <- paste0("chr", 1:13)
+
+plot_df_bslmm <- params %>%
+  # extract chromosome like "chr5" and position (last integer in the rs string)
+  mutate(
+    chr = str_extract(rs, "chr[^_:\\s]+"),   # e.g. "chr5"
+    pos = as.integer(str_extract(rs, "\\d+$"))  # last digits in string -> position
+  ) %>%
+  # force chr into the desired ordering (rows with chromosomes not in chr_order
+  # will get NA and be placed after these when arranged)
+  mutate(chr_factor = factor(chr, levels = chr_order)) %>%
+  arrange(chr_factor, pos) %>%
+  # continuous numbering across the whole dataset (1..N after arrange)
+  mutate(n = row_number()) %>%
+  select(-chr_factor) %>%
+  mutate(
+    n = as.integer(n),                            # ensure numeric
+    chr = factor(chr, levels = unique(chr)),      # keep encountered order
+    chr_idx = as.integer(chr),
+    point_col = ifelse(chr_idx %% 2 == 1, "#5a798f", "#2a3740")
+  )
+```
+
+```{r}
+# ---- plotting ----
+
+# build axisdf: midpoint for each chr on the numeric n scale
+axisdf <- plot_df_bslmm %>%
+  group_by(chr) %>%
+  summarize(x = (min(n) + max(n)) / 2) %>%
+  ungroup()
+
+# sparse effect size, used for dot size
+plot_df_bslmm$z <- plot_df_bslmm$eff
+# log-transform to enhance visibility
+plot_df_bslmm$z[plot_df_bslmm$z==0]<-0.00000000001
+plot_df_bslmm$z<-1/abs(log(plot_df_bslmm$z))
+
+manhattan_plot_bslmm <-
+ggplot(plot_df_bslmm, aes(x = n, y =gamma, size=z)) +
+  geom_jitter(aes(color = point_col), width = 0.18, height = 0, size = 1.8, show.legend = FALSE) +
+  scale_color_identity() +
+  scale_x_continuous(breaks = axisdf$x, labels = axisdf$chr, expand = expansion(mult = c(0.01, 0.01))) +
+  labs(x = " ", y = expression(-log[10](p[score]))) +
+  theme_minimal(base_family = "roboto_condensed") +
+  theme(
+    panel.grid = element_blank(),                      # remove grid entirely
+    axis.text.x = element_text(hjust = 1, family = "roboto_condensed"),
+    axis.title = element_text(family = "roboto_condensed"),
+    legend.position = "none"
+  )
+
+ggsave(manhattan_plot_bslmm,
+      filename=file.path(figures_path, "manhattan_plot_GLs_bslmm.png"),
+      width=12,
+      height=3)
+```
+
+

@@ -30,7 +30,7 @@ bcftools +fill-tags -Ob -o "${PATH_OUT}wm-gwas.bcf" -- -t AF,MAF
 
 # Keep biallelic SNPs only and apply site-level filters
 # Adjust depth thresholds based on sample size (N_samples * 2 to N_samples * 10)
-# For 500 samples at 4.5x avg: 1000 to 5000x total depth is reasonable
+# For 500 samples at 4.5x avg: 1000 to 12000x total depth is reasonable
 bcftools view -m2 -M2 -v snps -Ou "${PATH_OUT}wm-gwas.bcf" | \
-  bcftools view -i 'QUAL>20 && INFO/DP>=1000 && INFO/DP<=12000' \
+  bcftools view -i 'QUAL>10 && INFO/DP>=1000 && INFO/DP<=12000' \
   -Ou -o "${PATH_OUT}wm.sitefiltered.bcf"

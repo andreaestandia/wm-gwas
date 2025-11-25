@@ -1,0 +1,45 @@
+---
+title: "grm"
+author: "Andrea Estandia"
+date: "25/10/2025"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+# Knitr settings: 
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+options(scipen = 999)
+```
+
+```{r}
+source("./src/wm-gwas_source.R")
+```
+
+```{r}
+rel <- as.matrix(read.table(file.path(reports_path, "relatedness", "wm-gwas.relatedness.cXX.txt"))
+
+vcf_order <- read.csv(file.path(data_path, "dfs","vcf_order.csv"), header=F) %>%
+  rename(IID=V1)
+
+colnames(rel) <- vcf_order$IID
+rownames(rel) <- vcf_order$IID
+
+heatmap_plot <- heatmap(rel)
+
+out_file <- file.path(figures_path, "heatmap_rel.png")
+png(filename = out_file, width = 20, height = 20, units = "in", res = 300)
+heatmap(rel)
+dev.off()
+
+rel_scaled <- rel / mean(diag(rel))
+
+# sanity checks
+cat("after scaling mean diag =", mean(diag(rel_scaled)), "\ntrace =", sum(diag(rel_scaled)), "\n")
+
+# write file in plain whitespace-delimited format (no row/col names)
+write.table(rel_scaled, file = file.path(reports_path, "GRM_scaled.txt"), row.names = FALSE,
+            col.names = FALSE, quote = FALSE)
+```

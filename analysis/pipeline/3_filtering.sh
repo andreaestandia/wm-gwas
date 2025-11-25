@@ -16,7 +16,7 @@ ml BCFtools/1.14-GCC-11.2.0
 # Note: bam files need to be indexed (using samtools index) 
 REF=/data/biol-wm/sjoh4959/0.0_winter-moth/data/ref_genome/GCA_932527175.1/GCA_932527175.1_ilOpeBrum1.1_genomic_renamed.fna
 BAMs=/data/biol-gt-genomics/sjoh4959/wm-gwas/data/resources/list_bam
-PATH_OUT=/data/biol-gt-genomics/sjoh4959/wm-gwas/data/genotype_calling/
+PATH_OUT=/data/biol-gt-genomics/sjoh4959/wm-gwas/data/genotype_calling/GLs/
 
 cd $PATH_OUT
 
@@ -42,3 +42,17 @@ plink2 --allow-extra-chr \
        --maf 0.05 \
        --make-bed \
        --out wm-gwas.qc
+
+QCTOOL_PATH="/data/biol-gt-genomics/sjoh4959/wm-gwas/src/qctool/"
+
+# convert to bgen for GWAS with genotype probabilities (GP field)
+"${QCTOOL_PATH}qctool" \ 
+  -g wm-gwas.vcf.gz \
+  -og wm-gwas.bgen \
+  -vcf-genotype-field GP 
+
+"${QCTOOL_PATH}qctool" \
+  -g wm-gwas.filtered.vcf.gz \
+  -ofiletype bimbam_dosage \
+  -og wm-gwas.bimbam \
+  -vcf-genotype-field GP 
