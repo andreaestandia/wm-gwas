@@ -1,0 +1,97 @@
+---
+title: "plot_manhattan"
+author: "Andrea Estandia"
+date: "06/10/2025"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+# Knitr settings: 
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+options(scipen = 999)
+```
+
+```{r}
+source("./src/wm-gwas_source.R")
+```
+
+```{r}
+taj <- data.table::fread(file.path(reports_path, "tajimaD", "genome_tajimaD_10kb.Tajima.D")) %>%
+  mutate(
+    n   = row_number(),
+    n = as.integer(n),                            # ensure numeric
+    CHROM = factor(CHROM, levels = unique(CHROM)),      # keep encountered order
+    chr_idx = as.integer(CHROM),
+    point_col = ifelse(chr_idx %% 2 == 1, "#5a798f", "#2a3740")
+  )
+```
+
+```{r}
+# build axisdf: midpoint for each chr on the numeric n scale
+axisdf <- taj %>%
+  group_by(chr_idx) %>%
+  summarize(x = (min(n) + max(n)) / 2) %>%
+  ungroup()
+
+plot_taj <- ggplot(taj, aes(x = n, y = TajimaD+0.8)) +
+  geom_jitter(aes(color = point_col), width = 0.18, height = 0, size = 1.8, show.legend = FALSE) +
+  #geom_hline(yintercept = bonf, linetype = "dashed") +
+  scale_color_identity() +
+  scale_x_continuous(breaks = axisdf$x, labels = axisdf$chr_idx, expand = expansion(mult = c(0.01, 0.01))) +
+  labs(x = " ", y = "\nTajima's D\n") +
+  theme_minimal(base_family = "roboto_condensed") +
+  theme(
+    panel.grid = element_blank(),                      # remove grid entirely
+    axis.text.x = element_text(hjust = 1, family = "roboto_condensed"),
+    axis.title = element_text(family = "roboto_condensed"),
+    legend.position = "none"
+  )
+
+```
+
+```{r}
+pi <- data.table::fread(file.path(reports_path, "pi", "genome_pi_10kb.windowed.pi")) %>%
+  mutate(
+    n   = row_number(),
+    n = as.integer(n),                            # ensure numeric
+    CHROM = factor(CHROM, levels = unique(CHROM)),      # keep encountered order
+    chr_idx = as.integer(CHROM),
+    point_col = ifelse(chr_idx %% 2 == 1, "#5a798f", "#2a3740")
+  )
+```
+
+```{r}
+# build axisdf: midpoint for each chr on the numeric n scale
+axisdf <- pi %>%
+  group_by(chr_idx) %>%
+  summarize(x = (min(n) + max(n)) / 2) %>%
+  ungroup()
+
+plot_pi <- ggplot(pi, aes(x = n, y = PI)) +
+  geom_jitter(aes(color = point_col), width = 0.18, height = 0, size = 1.8, show.legend = FALSE) +
+  #geom_hline(yintercept = bonf, linetype = "dashed") +
+  scale_color_identity() +
+  scale_x_continuous(breaks = axisdf$x, labels = axisdf$chr_idx, expand = expansion(mult = c(0.01, 0.01))) +
+  labs(x = " ", y = "\nπ\n") +
+  theme_minimal(base_family = "roboto_condensed") +
+  theme(
+    panel.grid = element_blank(),                      # remove grid entirely
+    axis.text.x = element_text(hjust = 1, family = "roboto_condensed"),
+    axis.title = element_text(family = "roboto_condensed"),
+    legend.position = "none"
+  )
+
+```
+
+```{r}
+plot_combined <- plot_taj/plot_pi
+
+ggsave(plot_combined,
+      filename=file.path(figures_path, "tajima_pi_50kb.png"),
+      width=12,
+      height=6)
+
+```
