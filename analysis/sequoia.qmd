@@ -1,0 +1,201 @@
+---
+title: "sequoia"
+author: "Andrea Estandia"
+date: "25/10/2025"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+# Knitr settings: 
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+options(scipen = 999)
+```
+
+```{r}
+source("./src/wm-gwas_source.R")
+```
+
+Define thresholds
+```{r}
+SNP_CALLRATE_THRESH <- 0.90   # keep SNPs with >= 90% non-missing
+IND_CALLRATE_THRESH <- 0.80   # keep individuals with >= 80% non-missing
+MAF_THRESH <- 0.01            # keep SNPs with MAF > 0.01
+GENOTYPE_ERROR <- 0.01        # error parameter LIBBY TO CHECK DIFFERENT VALUES from 0.0001 to 0.1
+```
+
+Read data. In this case 50000 SNPs. To get this file run generate_sequoia.sh in ARC
+```{r}
+snps <- GenoConvert(file.path(data_path, "processed", "wm-gwas.qc_subset.ped"))
+```
+
+Input sanitisation
+```{r}
+# ensure `snps` is converted to a numeric matrix and rownames are present.
+# Expectation: `snps` exists in the environment: rows = individuals, cols = SNPs,
+# values coded 0,1,2 (or NA).
+if (!exists("snps")) stop("Object `snps` not found. Please provide genotype data in `snps`.")
+
+# Ensure numeric matrix
+GenoM <- as.matrix(snps)
+mode(GenoM) <- "numeric"
+
+# Ensure rownames exist — if not, create temporary IDs
+if (is.null(rownames(GenoM)) || any(rownames(GenoM) == "")) {
+  rownames(GenoM) <- paste0("IND", seq_len(nrow(GenoM)))
+  warning("No rownames found in `snps`. Temporary IDs (IND1, IND2, ...) were created.")
+}
+
+```
+
+Call-rate filtering (SNPs and individuals)
+```{r}
+# calculate callrates
+snp_callrate <- colMeans(!is.na(GenoM))
+ind_callrate <- rowMeans(!is.na(GenoM))
+
+# report (optional)
+message("Genotypes: ", nrow(GenoM), " individuals x ", ncol(GenoM), " SNPs before filtering.")
+message("SNP callrate: mean=", round(mean(snp_callrate), 3),
+        "  -- Individual callrate: mean=", round(mean(ind_callrate), 3))
+
+# apply thresholds
+keep_snps_idx <- which(snp_callrate >= SNP_CALLRATE_THRESH)
+keep_inds_idx <- which(ind_callrate >= IND_CALLRATE_THRESH)
+
+GenoM_qc1 <- GenoM[keep_inds_idx, keep_snps_idx, drop = FALSE]
+
+message("After call-rate filtering: ", nrow(GenoM_qc1), " individuals x ",
+        ncol(GenoM_qc1), " SNPs kept.")
+
+```
+
+Minimum allele frequency (MAF) filtering
+```{r}
+compute_maf <- function(vec) {
+  vec <- vec[!is.na(vec)]
+  if (length(vec) == 0L) return(NA_real_)
+  # allele frequency p = sum(genotypes)/(2*N)
+  p <- sum(vec) / (2 * length(vec))
+  p <- min(p, 1 - p)
+  as.numeric(p)
+}
+
+maf_vec <- apply(GenoM_qc1, 2, compute_maf)
+keep_maf_idx <- which(!is.na(maf_vec) & maf_vec > MAF_THRESH)
+
+GenoM_qc2 <- GenoM_qc1[, keep_maf_idx, drop = FALSE]
+
+message("After MAF filtering (>", MAF_THRESH, "): ",
+        nrow(GenoM_qc2), " individuals x ", ncol(GenoM_qc2), " SNPs kept.")
+```
+
+Construct LifeHistData for Sequoia
+```{r}
+IDs <- rownames(GenoM_qc2)
+
+LifeHistData <- data.frame(
+  ID = IDs,
+  Sex = 3L,                # 1 = female, 2 = male, 3 = unknown
+  BirthYear = as.integer(NA), # Libby to modify this so the AgePrior is the same for all individuals 
+  stringsAsFactors = FALSE
+)
+
+# Optional: check for duplicated IDs (shouldn't happen)
+if (any(duplicated(LifeHistData$ID))) {
+  stop("Duplicated IDs found in LifeHistData: ", paste(unique(LifeHistData$ID[duplicated(LifeHistData$ID)]), collapse = ", "))
+}
+```
+
+Run pedigree inference with sequoia (pedigree mode)
+```{r}
+SeqOUT_ped <- sequoia::sequoia(
+  GenoM = GenoM_qc2,
+  LifeHistData = LifeHistData,
+  Module = "ped",
+  Err = GENOTYPE_ERROR,
+  quiet = FALSE
+)
+# extract pedigree object
+ped <- as.data.frame(SeqOUT_ped$Pedigree, stringsAsFactors = FALSE)
+head(ped)
+```
+
+Tidy pedigree and extract mother-prefix
+```{r}
+ped2 <- ped %>%
+  mutate(
+    OrigID = id,
+    MotherPrefix = str_extract(id, "^[^_]+")  # everything before first underscore
+  ) %>%
+  select(OrigID, MotherPrefix, dam, sire)
+```
+
+Summarise by mother-prefix (families) and identify multi-sire families
+```{r}
+family_sire_summary <- ped2 %>%
+  group_by(MotherPrefix) %>%
+  summarise(
+    n_offspring = n(),
+    assigned_sires = list(na.omit(unique(sire))),
+    n_unique_sires = length(na.omit(unique(sire))),
+    sires_str = ifelse(n_unique_sires > 0, paste(na.omit(unique(sire)), collapse = ", "), NA_character_)
+  ) %>%
+  arrange(desc(n_unique_sires), desc(n_offspring))
+
+# families with >1 inferred father
+multi_father_families <- family_sire_summary %>% filter(n_unique_sires > 1)
+
+# Print summaries
+print(family_sire_summary)
+```
+
+Plot frequency
+```{r}
+hist_n_fathers <-
+family_sire_summary %>%
+  filter(n_unique_sires>0) %>%
+  ggplot(aes(x=n_unique_sires))+
+  geom_histogram()+
+  theme_minimal(base_family = "roboto_condensed") +
+  theme(
+    panel.grid = element_blank(),                      
+    axis.text.x = element_text(hjust = 1, family = "roboto_condensed"),
+    axis.title = element_text(family = "roboto_condensed")
+  ) + 
+  labs(x="\nNumber of inferred fathers", y="\nCount", title="Number of fathers contributing to each family", subtitle="Using Sequoia and 16,000 SNPs")
+
+ggsave(hist_n_fathers,
+      filename=file.path(figures_path, "hist_n_fathers.png"),
+      width=4,
+      height=4)
+```
+
+Summarise by sire: how many distinct mother-prefixes does each sire appear with?
+```{r}
+sire_family_summary <- ped2 %>%
+  filter(!is.na(sire) & sire != "") %>%
+  group_by(sire) %>%
+  summarise(
+    n_offspring = n(),
+    unique_mothers = list(sort(unique(MotherPrefix))),
+    n_unique_mothers = length(unique(MotherPrefix)),
+    mothers = paste(sort(unique(MotherPrefix)), collapse = ", ")
+  ) %>%
+  arrange(desc(n_unique_mothers), desc(n_offspring))
+
+# sires that appear across multiple mother-prefixes
+multi_family_sires <- sire_family_summary %>% filter(n_unique_mothers > 1)
+
+# Print results
+print(sire_family_summary)
+```
+
+For families with "1 sire", consider whether the data actually support monogamy vs. simply failing to detect multiple sires. 
+
+LIBBY TO EXPLORE
+```{r}
+
+```
