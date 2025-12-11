@@ -19,7 +19,7 @@ source("./src/wm-gwas_source.R")
 ```
 
 ```{r}
-assoc <- data.table::fread(file.path(reports_path, "gwas", "wm-gwas_GLs.assoc.txt"))
+assoc <- data.table::fread(file.path(reports_path, "gwas", "wm-gwas.gemma_GLs_filtered.assoc.txt"))
 
 assoc$n <- 1:nrow(assoc)
 ```
@@ -72,7 +72,7 @@ ggplot(plot_df, aes(x = n, y = -log10(p_score_safe))) +
   )
 
 ggsave(manhattan_plot,
-      filename=file.path(figures_path, "manhattan_plot_GLs.png"),
+      filename=file.path(figures_path, "manhattan_plot_GLs_filtered.png"),
       width=12,
       height=3)
 ```
@@ -113,8 +113,8 @@ qq_plot <- ggplot(qq_df, aes(x = expected, y = observed)) +
 
 ggsave(qq_plot,
       filename=file.path(figures_path, "qq_plot.png"),
-      width=7,
-      height=7)
+      width=3,
+      height=3)
 ```
 
 Bayesian sparsed linear mixed model to check for major effect loci. Plot only non-zero effect loci.
@@ -260,4 +260,122 @@ ggsave(manhattan_plot_bslmm,
       height=3)
 ```
 
+Check outliers and see if heterozygosity is associated with sex to explore mapping issues
+```{r}
+pheno <- read.table(file.path(data_path, "dfs", "pheno.txt"), header=T)
+sex <- read.csv(file.path(data_path, "dfs", "sex.csv"), header=T)
 
+gts <- read.table(file.path(reports_path, "gwas", "all_sites.tsv"), header=T) %>%
+left_join(pheno, by="IID") %>% left_join(sex, by="IID")
+
+gts_long <- gts %>%
+    mutate(
+    FID = sub("_.*", "", IID)) %>%
+  pivot_longer(
+    cols = starts_with("chr"),
+    names_to = "chr_pos",
+    values_to = "genotype"
+  )
+
+# Keep only families with >1 genotype for this SNP
+families_with_variation <- gts_long %>%
+  filter(chr_pos == "chr10_9141439", genotype != "NA") %>%
+  group_by(FID) %>%
+  summarise(n_genotypes = n_distinct(genotype)) %>%
+  filter(n_genotypes > 1) %>%
+  pull(FID)
+
+families_without_variation <- gts_long %>%
+  filter(chr_pos == "chr10_9141439", genotype != "NA") %>%
+  group_by(FID) %>%
+  summarise(n_genotypes = n_distinct(genotype)) %>%
+  filter(n_genotypes == 1) %>%
+  pull(FID)
+
+plot_effect_outliers_pheno_family <- 
+  gts_long %>%
+  filter(chr_pos == "chr10_9141439",
+         genotype != "NA",
+         FID %in% families_with_variation) %>%   # <-- keep only informative families
+  mutate(genotype = factor(genotype, levels = c("0/0", "0/1", "1/1"))) %>%
+  ggplot(aes(x = genotype, y = hatch_date, color = genotype)) +
+  geom_jitter(width = 0.01, height = 0, alpha = 0.8, size = 2) +
+  stat_summary(fun.data = mean_cl_normal, geom = "pointrange", 
+               color = "black", size = 0.5) +
+  scale_color_manual(values = c("0/0" = "#60a0d1",
+                                "0/1" = "#d1be60",
+                                "1/1" = "#e6584e")) +
+  facet_wrap(~ FID, scales = "free_y", ncol = 4) +
+  theme_minimal(base_family = "Roboto Condensed") +
+  theme(panel.grid = element_blank(),
+        strip.text = element_text(size = 10, face = "bold"),
+        axis.text = element_text(size = 9),
+        axis.title = element_text(size = 11)) +
+  labs(x = "\nGenotype\n",
+       y = "\nHatching date\n",
+       title = "Top SNP: chr10_9107590 (families with >1 genotype)",
+       subtitle = "Faceted by family (FID)")
+
+ggsave(plot_effect_outliers_pheno_family,
+      filename = file.path(figures_path, "plot_effect_outliers_pheno_family.png"),
+      width = 10,
+      height = 26)
+
+plot_effect_outliers_sex_family <- 
+  gts_long %>%
+  filter(chr_pos == "chr10_9141439",
+         genotype != "NA",
+         FID %in% families_with_variation) %>%  
+  ggplot(aes(x = genotype, y = hatch_date, color = sex)) +
+  geom_jitter(width = 0.01, height = 0, alpha = 0.8, size = 2) +
+  stat_summary(fun.data = mean_cl_normal, geom = "pointrange", 
+               color = "black", size = 0.5) +
+  scale_color_manual(values = c("male" = "#60a0d1",
+                                "female" = "#e6584e")) +
+  facet_wrap(~ FID, scales = "free_y", ncol = 4) +
+  theme_minimal(base_family = "Roboto Condensed") +
+  theme(panel.grid = element_blank(),
+        strip.text = element_text(size = 10, face = "bold"),
+        axis.text = element_text(size = 9),
+        axis.title = element_text(size = 11)) +
+  labs(x = "\nGenotype\n",
+       y = "\nHatching date\n",
+       title = "Top SNP: chr10_9107590 (families with >1 genotype)",
+       subtitle = "Faceted by family (FID)")
+
+tab <- gts_long %>%
+  filter(chr_pos == "chr10_9107590",
+         genotype != "NA",
+         FID %in% families_with_variation) %>%
+  count(sex, genotype) %>%
+  tidyr::pivot_wider(names_from = genotype, values_from = n, values_fill = 0)
+
+tab
+
+
+plot_effect_outliers_pheno <-
+  gts_long %>%
+  separate(chr_pos, into = c("chr", "pos"), sep = "_", convert = TRUE, remove = FALSE) %>%
+  filter(!is.na(genotype)) %>%                     # safer than genotype != "NA"
+  filter(chr == "chr10") %>%
+  mutate(genotype = factor(genotype, levels = c("0/0", "0/1", "1/1"))) %>%
+  ggplot(aes(x = genotype, y = hatch_date, color = genotype)) +
+    geom_jitter(width = 0.15, alpha = 0.8, size = 2) +
+    stat_summary(fun.data = mean_cl_normal,
+                 geom = "pointrange",
+                 color = "black",
+                 size = 0.5) +
+    scale_color_manual(values = c("0/0" = "#60a0d1",
+                                  "0/1" = "#d1be60",
+                                  "1/1" = "#e6584e")) +
+    facet_wrap(~ chr_pos, scales = "free_x") +
+    theme_minimal(base_family = "roboto_condensed") +
+    theme(
+      panel.grid = element_blank(),
+      strip.text = element_text(size = 12, face = "bold"),
+      axis.text = element_text(size = 10),
+      axis.title = element_text(size = 12)
+    ) +
+    labs(x = "\nGenotype\n", y = "\nHatching date\n")
+
+```
