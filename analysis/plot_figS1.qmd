@@ -1,0 +1,84 @@
+---
+title: "plot_figS1"
+author: "Andrea Estandia"
+date: "06/10/2025"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+# Knitr settings: 
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+options(scipen = 999)
+```
+
+```{r}
+source("./src/wm-gwas_source.R")
+```
+
+Read data
+```{r}
+samples <- read.csv(file.path(data_path, "dfs", "samples.csv"))
+
+phenotypes <- read.csv(file.path(data_path, "dfs", "gwas_hatch_checks.csv")) %>%
+  dplyr::select(egg_id, hatch_date) 
+```
+
+Data cleaning
+```{r}
+daily_df <- phenotypes %>%
+filter(egg_id %in% samples$IID) %>%
+  mutate(
+    hatch_date = dmy(hatch_date)  # parses "dd/mm/yyyy"; keeps NA as NA
+  ) %>%
+  filter(!is.na(hatch_date)) %>%
+  count(hatch_date, name = "daily_count") %>%
+  arrange(hatch_date) %>%
+  mutate(cum_count = cumsum(daily_count))
+
+# ---- scaling for dual axis ----
+# We map cumulative -> left axis by dividing by 'k', then recover on right axis by *k
+k <- max(daily_df$cum_count) / max(daily_df$daily_count)
+```
+
+Plot hatching times
+```{r}
+p <- ggplot(daily_df, aes(x = hatch_date)) +
+  geom_line(aes(y = cum_count / k, color = "Cumulative count"), linewidth = 1.6) +
+  geom_line(aes(y = daily_count, color = "Daily count"),      linewidth = 1.6) +
+  scale_y_continuous(
+    name = "Daily Count",
+    sec.axis = sec_axis(~ . * k, name = "Cumulative Count")
+  ) +
+  scale_color_manual(
+    values = c("Cumulative count" = "#2f3b40", "Daily count" = "#79aeca"),
+    breaks = c("Cumulative count", "Daily count"),
+    name = NULL
+  ) +
+  scale_x_date(
+    name = "\nHatch date",                     # ← x-axis label
+    date_breaks = "1 week",
+    date_labels = "%b %d"
+  ) +
+  theme_classic(base_family = "roboto_condensed") +
+  theme(
+    axis.line = element_line(linewidth = 1.2),
+    axis.ticks = element_line(linewidth = 1.2),
+    axis.ticks.length = unit(6, "pt"),
+    axis.title.x = element_text(hjust = 0.5), # ← centered
+    axis.title.y = element_text(margin = margin(r = 12)),
+    axis.title.y.right = element_text(margin = margin(l = 12), angle = 270),
+    legend.position = "bottom",
+    legend.text = element_text(size = 11),
+    plot.margin = margin(14, 18, 14, 18)
+  )
+
+p
+
+ggsave(p,
+      filename=file.path(figures_path, "figS1.png"),
+      width=6,
+      height=4)
+```
