@@ -1,0 +1,218 @@
+---
+title: "coverage"
+author: "Andrea Estandia"
+date: "06/12/2025"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+# Knitr settings: 
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+options(scipen = 999)
+```
+
+```{r}
+source("./src/wm-gwas_source.R")
+```
+
+```{r}
+cov_Z <- read.table(file.path(reports_path, "coverage", "mean_coverage_chrZ_per_sample.tsv"), header =T)
+
+cov_auto <- read.table(file.path(reports_path, "coverage", "mean_coverage_per_sample.tsv"), header =T) 
+
+coverage <- left_join(cov_auto, cov_Z, by="sample") %>%
+filter(mean_chrZ_depth != "NA" & mean_autosomal_depth != "NA") %>%
+  mutate(
+    mean_chrZ_depth = as.numeric(mean_chrZ_depth),
+    mean_autosomal_depth = as.numeric(mean_autosomal_depth),
+    chrZ_to_autosome_ratio = mean_chrZ_depth / mean_autosomal_depth
+  )
+
+med_depth <- cov_auto %>%
+  filter(mean_autosomal_depth > 2) %>%
+  pull(mean_autosomal_depth) %>%
+  mean() %>%
+  round()
+
+cov_autosomes <-
+cov_auto %>%
+  filter(mean_autosomal_depth > 2) %>%
+  ggplot(aes(x = mean_autosomal_depth)) +
+  geom_histogram(
+    bins = 30,
+    fill = "grey70",
+    colour = "grey70"
+  ) +
+  geom_vline(
+    xintercept = med_depth,
+    linewidth = 1,
+    linetype = "dashed",
+    colour = "maroon"
+  ) +
+  theme_classic(base_family = "roboto_condensed") +
+  theme(
+    axis.line = element_line(linewidth = 1),
+    axis.ticks = element_line(linewidth = 1)
+  ) +
+  labs(
+    x = "\nMean autosomal depth",
+    y = "Count"
+  )
+
+ggsave(cov_autosomes,
+      filename=file.path(figures_path, "figS2.png"),
+      width=4,
+      height=4)
+
+```
+
+```{r}
+# Use k-means clustering to identify groups (try k=2 and k=3)
+set.seed(123)
+
+# Try k=2 (assuming 2 sexes)
+kmeans_2 <- kmeans(coverage$chrZ_to_autosome_ratio, centers = 2, nstart = 25)
+coverage$cluster_2 <- factor(kmeans_2$cluster)
+
+# Try k=3 (in case there are 3 groups)
+kmeans_3 <- kmeans(coverage$chrZ_to_autosome_ratio, centers = 3, nstart = 25)
+coverage$cluster_3 <- factor(kmeans_3$cluster)
+
+# Get cluster centers and assign sex based on ratio
+# Lower ratio = Female (ZW), Higher ratio = Male (ZZ)
+cluster_2_centers <- data.frame(
+  cluster = as.factor(1:2),
+  center = kmeans_2$centers[,1]
+) %>%
+  arrange(center) %>%
+  mutate(sex = c("Female", "Male"))
+
+cluster_3_centers <- data.frame(
+  cluster = as.factor(1:3),
+  center = kmeans_3$centers[,1]
+) %>%
+  arrange(center) %>%
+  mutate(group = c("Group1_Low", "Group2_Mid", "Group3_High"))
+
+# Assign sex for k=2
+coverage <- coverage %>%
+  left_join(cluster_2_centers %>% select(cluster, sex), 
+            by = c("cluster_2" = "cluster"))
+
+# Print cluster information
+coverage %>%
+  group_by(sex) %>%
+  summarise(
+    n = n(),
+    mean_ratio = mean(chrZ_to_autosome_ratio),
+    sd_ratio = sd(chrZ_to_autosome_ratio),
+    min_ratio = min(chrZ_to_autosome_ratio),
+    max_ratio = max(chrZ_to_autosome_ratio)
+  ) %>%
+  print()
+
+# Plot 1: Histogram with k=2 clustering
+p1 <- ggplot(coverage, aes(x = chrZ_to_autosome_ratio, fill = sex)) +
+  geom_histogram(bins = 50, alpha = 0.7, position = "identity") +
+  geom_vline(data = cluster_2_centers, aes(xintercept = center, color = sex),
+             linetype = "dashed", size = 1.5) +
+  scale_fill_manual(values = c("Female" = "#FF6B6B", "Male" = "#4ECDC4")) +
+  scale_color_manual(values = c("Female" = "#FF6B6B", "Male" = "#4ECDC4")) +
+  labs(
+    title = "Sex Determination Based on chrZ:Autosome Coverage Ratio (k=2)",
+    subtitle = paste0("Female center: ", round(cluster_2_centers$center[1], 3), 
+                     " | Male center: ", round(cluster_2_centers$center[2], 3)),
+    x = "chrZ / Autosome Coverage Ratio",
+    y = "Number of Samples",
+    fill = "Predicted Sex",
+    color = "Cluster Center"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "top",
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 12, color = "gray40")
+  )
+
+
+# Plot 2: Density plot comparing k=2 and k=3
+p2 <- ggplot(coverage, aes(x = chrZ_to_autosome_ratio)) +
+  geom_density(fill = "gray", alpha = 0.3, size = 1) +
+  geom_vline(data = cluster_2_centers, aes(xintercept = center),
+             linetype = "dashed", color = "red", size = 1) +
+  geom_vline(data = cluster_3_centers, aes(xintercept = center),
+             linetype = "dotted", color = "blue", size = 1) +
+  annotate("text", x = 0.85, y = Inf, 
+           label = "Red dashed: k=2\nBlue dotted: k=3", 
+           vjust = 2, hjust = 0, color = "black", size = 4) +
+  labs(
+    title = "Overall Distribution with Cluster Centers",
+    x = "chrZ / Autosome Coverage Ratio",
+    y = "Density"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16)
+  )
+
+# Plot 3: Scatter plot
+p3 <- ggplot(coverage, aes(x = mean_autosomal_depth, y = mean_chrZ_depth, 
+                           color = sex)) +
+  geom_point(size = 3, alpha = 0.6) +
+  scale_color_manual(values = c("Female" = "#FF6B6B", "Male" = "#4ECDC4")) +
+  labs(
+    title = "chrZ vs Autosomal Coverage",
+    x = "Mean Autosomal Coverage",
+    y = "Mean chrZ Coverage",
+    color = "Predicted Sex (k=2)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "top",
+    plot.title = element_text(face = "bold", size = 16)
+  )
+
+# Display plots
+print(p1)
+print(p2)
+print(p3)
+```
+
+```{r}
+coverage_renamed <- coverage %>%
+    rename(IID=sample) %>%
+    mutate(IID = sub("_dedup$", "", IID))
+
+pca_Z <- read.table(file.path(reports_path, "pca", "chrZ.eigenvec"), header = T) %>% left_join(coverage_renamed, by="IID")
+
+pca_chrZ <-
+pca_Z %>%
+    ggplot(aes(x=PC1, y=PC2, col=sex))+
+    geom_point()+
+    scale_color_manual(values=c("#d94b41", "#4f8ca8"))+
+    theme_minimal(base_family = "roboto_condensed") +
+  theme(
+    panel.grid = element_blank(),                      
+    axis.text.x = element_text(hjust = 1, family = "roboto_condensed"),
+    axis.title = element_text(family = "roboto_condensed")
+  ) + 
+  labs(x="\nPC1", y="\nPC2", title="PCA on chrZ coloured by classification \n based on coverage")
+
+ggsave(pca_chrZ,
+      filename=file.path(figures_path, "pca_chrZ.png"),
+      width=4,
+      height=4)
+
+
+pca_Z_subset <- pca_Z %>%
+  mutate(assigned_sex = case_when(
+    PC1 < -0.02 ~ "female",
+    PC1 >  0.01 ~ "male",
+    TRUE ~ NA_character_
+  ))
+
+write.csv(pca_Z_subset, file.path(reports_path, "pca", "pca_Z.csv"))
+```
