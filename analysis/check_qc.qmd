@@ -1,0 +1,71 @@
+---
+title: "check_qc"
+author: "Andrea Estandia"
+date: "09/12/2025"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+# Knitr settings: 
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+options(scipen = 999)
+```
+
+```{r}
+source("./src/wm-gwas_source.R")
+```
+
+```{r}
+het <- read.table(file.path(reports_path, "het", "wm-gwas.qc.pruned.het"), header=T)
+
+miss <- read.table(file.path(reports_path, "missingness", "wm-gwas.qc.smiss"), header=T)
+```
+
+```{r}
+plot_het <- 
+het %>%
+    ggplot(aes(x=F))+
+    geom_histogram()+
+    geom_vline(xintercept=3*sd(het$F), linetype="dashed", col="#c73030")+
+    geom_vline(xintercept= -3*sd(het$F), linetype="dashed", col="#c73030")+
+  theme_minimal(base_family = "roboto_condensed") +
+  theme(
+    panel.grid = element_blank(),                      
+    axis.text.x = element_text(hjust = 1, family = "roboto_condensed"),
+    axis.title = element_text(family = "roboto_condensed"),
+    legend.position = "none"
+  )
+
+plot_miss <- 
+miss %>%
+    ggplot(aes(x=F_MISS))+
+    geom_histogram()+
+    geom_vline(xintercept=3*sd(het$F), linetype="dashed", col="#c73030")+
+    geom_vline(xintercept= -3*sd(het$F), linetype="dashed", col="#c73030")+
+  theme_minimal(base_family = "roboto_condensed") +
+  theme(
+    panel.grid = element_blank(),                      
+    axis.text.x = element_text(hjust = 1, family = "roboto_condensed"),
+    axis.title = element_text(family = "roboto_condensed"),
+    legend.position = "none"
+  )
+
+plot_het_miss <- plot_het + plot_miss + plot_annotation(tag_levels="A")
+
+ggsave(plot_het_miss,
+      filename=file.path(figures_path, "qc.png"),
+      width=6,
+      height=3)
+```
+
+Exclude samples exceeding missing and heterozygosity thresholds 
+```{r}
+het %>%
+    filter(F > 3*sd(het$F) | F < -3*sd(het$F))
+
+miss %>%
+    filter(F_MISS > 3*sd(miss$F_MISS))
+```

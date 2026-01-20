@@ -1,0 +1,350 @@
+---
+title: "ld"
+author: "Andrea Estandia"
+date: "20/12/2026"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+# Knitr settings: 
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+options(scipen = 999)
+```
+
+```{r}
+source("./src/wm-gwas_source.R")
+```
+
+```{r}
+ld_mat <- as.matrix(read.table(
+  file.path(reports_path, "ld", "ld_with_lead_chr10.ld"),
+  header = FALSE
+))
+
+snp_ids <-  read.table(
+  file.path(reports_path, "ld", "ld_with_lead_chr10.bim" ),
+  header = TRUE,
+  check.names = FALSE
+)  
+
+ids <- snp_ids$chr_pos
+
+dim(ld_mat)
+stopifnot(nrow(ld_mat) == length(ids), ncol(ld_mat) == length(ids))
+
+rownames(ld_mat) <- snp_ids$chr_pos
+colnames(ld_mat) <- snp_ids$chr_pos
+```
+
+```{r}
+ld_long <- as.data.frame(ld_mat, check.names = FALSE) |>
+  tibble::rownames_to_column("SNP1") |>
+  pivot_longer(-SNP1, names_to = "SNP2", values_to = "r2")
+
+```
+
+```{r}
+get_pos <- function(x) as.numeric(sub(".*_", "", x))
+
+snp_order <- unique(ld_long$SNP1)
+snp_order <- snp_order[order(get_pos(snp_order))]
+
+ld_long <- ld_long |>
+  mutate(
+    SNP1 = factor(SNP1, levels = snp_order),
+    SNP2 = factor(SNP2, levels = snp_order)
+  )
+
+idx <- seq_along(snp_order)
+names(idx) <- snp_order
+
+ld_long <- ld_long |>
+  mutate(i = idx[as.character(SNP1)],
+         j = idx[as.character(SNP2)]) |>
+  filter(i >= j)
+
+```
+
+```{r}
+assoc2 <- assoc |>
+  mutate(chr_pos = sub(":.*", "", rs))
+
+sig_snps <- assoc2 |>
+  filter(p_score < 5e-6) |>
+  pull(chr_pos)
+
+intersect(sig_snps, unique(ld_long$SNP1))
+
+ld_long <- ld_long |>
+  mutate(sig_tile = SNP1 %in% sig_snps | SNP2 %in% sig_snps)
+
+ld_chr10 <-
+ggplot(ld_long, aes(SNP1, SNP2, fill = r2)) +
+  geom_tile() +
+  geom_tile(
+    data = subset(ld_long, sig_tile),
+    color = "black",
+    fill = NA,
+    linewidth = 0.15
+  ) +
+  coord_fixed() +
+  scale_fill_viridis_c(
+    option = "magma",
+    direction = -1,
+    name = expression(r^2)
+  ) +
+  theme_minimal(base_family = "roboto_condensed") +
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.title = element_blank(),
+    panel.grid = element_blank()
+  )
+```
+
+Plot zoomed in Manhattan plot
+```{r}
+assoc <- data.table::fread(file.path(reports_path, "gwas", "wm-gwas.gemma_GLs_filtered.assoc.txt"))
+
+assoc$n <- 1:nrow(assoc)
+```
+
+```{r}
+assoc2 <- assoc %>%
+  mutate(
+    chr = str_extract(rs, "^[^_:\\s]+"),   # first chunk e.g. "chr1"
+    n   = row_number(),
+    p_score_safe = pmax(p_score, 1e-300)
+  )
+
+```
+
+```{r}
+# recompute bonf 
+bonf <- -log10(0.00005 / nrow(assoc2))
+
+# prepare plot_df (only points above threshold)
+plot_df <- assoc2 %>%
+  mutate(chr = ifelse(is.na(chr) | chr == "", str_extract(rs, "^[^_:\\s]+"), chr)) %>%
+  filter(-log10(p_score_safe) > 1) %>%
+  mutate(
+    n = as.integer(n),                            # ensure numeric
+    chr = factor(chr, levels = unique(chr)),      # keep encountered order
+    chr_idx = as.integer(chr),
+    point_col = ifelse(chr_idx %% 2 == 1, "#5a798f", "#2a3740")
+  )
+
+# build axisdf: midpoint for each chr on the numeric n scale
+axisdf <- plot_df %>%
+  group_by(chr) %>%
+  summarize(x = (min(n) + max(n)) / 2) %>%
+  ungroup()
+
+manhattan_plot_chr10 <-
+plot_df %>%
+ mutate(
+    chr_pos = sub(":.*", "", rs),
+    pos = as.numeric(sub(".*_", "", chr_pos))
+  )%>%
+filter(chr=="chr10") %>%
+filter(
+    chr == "chr10",
+    pos >= 7049620,
+    pos <= 10925351
+  ) %>%
+ggplot(aes(x = n, y = -log10(p_score_safe))) +
+  geom_jitter(aes(color = point_col), width = 0.18, height = 0, size = 1.8, show.legend = FALSE) +
+  geom_hline(yintercept = bonf, linetype = "dashed") +
+  scale_color_identity() +
+  scale_x_continuous(breaks = axisdf$x, labels = axisdf$chr, expand = expansion(mult = c(0.01, 0.01))) +
+  labs(title="Association peak on Chromosome 10: 7049620-10925351", x = "Chromosome 10", y = expression(-log[10](p[score]))) +
+  theme_minimal(base_family = "roboto_condensed") +
+  theme(
+    panel.grid = element_blank(),                      # remove grid entirely
+    axis.text.x = element_text(hjust = 1, family = "roboto_condensed"),
+    axis.title = element_text(family = "roboto_condensed"),
+    legend.position = "none"
+  )
+
+plot_df %>%
+ mutate(
+    chr_pos = sub(":.*", "", rs),
+    pos = as.numeric(sub(".*_", "", chr_pos))
+  )%>%
+filter(chr=="chr8") %>% arrange(p_score) %>% slice(1:10) %>% arrange(pos)
+
+manhattan_plot_chr8 <-
+plot_df %>%
+ mutate(
+    chr_pos = sub(":.*", "", rs),
+    pos = as.numeric(sub(".*_", "", chr_pos))
+  ) %>%
+filter(
+    chr == "chr8",
+    pos >= 2343733,
+    pos <= 8301796
+  ) %>%
+ggplot(aes(x = n, y = -log10(p_score_safe))) +
+  geom_jitter(aes(color = point_col), width = 0.18, height = 0, size = 1.8, show.legend = FALSE) +
+  geom_hline(yintercept = bonf, linetype = "dashed") +
+  scale_color_identity() +
+  scale_x_continuous(breaks = axisdf$x, labels = axisdf$chr, expand = expansion(mult = c(0.01, 0.01))) +
+  labs(title="Association peak on Chromosome 8: 2343733-8301796", x = "Chromosome 10", y = expression(-log[10](p[score]))) +
+  theme_minimal(base_family = "roboto_condensed") +
+  theme(
+    panel.grid = element_blank(),                      # remove grid entirely
+    axis.text.x = element_text(hjust = 1, family = "roboto_condensed"),
+    axis.title = element_text(family = "roboto_condensed"),
+    legend.position = "none"
+  )
+
+chr10 <- (manhattan_plot_chr10+ld_chr10)
+
+ggsave(chr10,
+      filename=file.path(figures_path, "association_peak_chr10.png"),
+      width=8,
+      height=4)
+
+```
+
+Test whether SNPs from the associated regions have higher LD with each other than the background 
+```{r}
+# extract chr_pos and numeric position from assoc table
+assoc2 <- assoc %>%
+  mutate(
+    chr_pos = sub(":.*", "", rs),
+    pos = as.numeric(sub(".*_", "", chr_pos))
+  )
+
+# define associated SNPs (choose threshold)
+assoc_snps <- assoc2 %>%
+  filter(p_score < 1e-5) %>%      # adjust if needed
+  pull(chr_pos)
+
+# SNP positions from LD matrix
+snp_info <- tibble(
+  chr_pos = rownames(ld_mat),
+  pos = as.numeric(sub(".*_", "", chr_pos))
+)
+
+mean_local_ld <- function(snp, window = 25000) {
+  pos_i <- snp_info$pos[snp_info$chr_pos == snp]
+
+  neighbors <- snp_info %>%
+    filter(abs(pos - pos_i) <= window) %>%
+    pull(chr_pos)
+
+  # exclude self
+  neighbors <- setdiff(neighbors, snp)
+
+  if (length(neighbors) == 0) return(NA_real_)
+
+  mean(ld_mat[snp, neighbors], na.rm = TRUE)
+}
+
+snp_info <- snp_info %>%
+  mutate(
+    is_assoc = chr_pos %in% assoc_snps,
+    mean_ld_25kb = sapply(chr_pos, mean_local_ld)
+  )
+
+summary_stats <- snp_info %>%
+  filter(!is.na(mean_ld_25kb)) %>%
+  group_by(is_assoc) %>%
+  summarise(
+    mean_ld = mean(mean_ld_25kb),
+    median_ld = median(mean_ld_25kb),
+    n = n()
+  )
+
+summary_stats
+
+diff_ld_background_associated <- 
+ggplot(snp_info, aes(x = is_assoc, y = mean_ld_25kb, fill = is_assoc)) +
+  geom_half_violin(
+    side = "r",
+    alpha = 0.7,
+    width = 0.8,
+    color = NA        # 🔹 removes violin outline
+  ) +
+  geom_jitter(
+    aes(color = is_assoc),
+    width = 0.06,
+    alpha = 0.35,
+    size = 1
+  ) +
+  stat_summary(
+    fun = mean,
+    geom = "point",
+    shape = 21,
+    size = 3.5,
+    fill = "#325a70",
+    color = "#325a70"
+  ) +
+  stat_summary(
+    fun.data = mean_cl_normal,  # mean ± 95% CI
+    geom = "errorbar",
+    width = 0.05,
+    color = "#325a70",
+    linewidth = 0.8
+  ) +
+  scale_fill_manual(values = c("#5da2c9", "#c9bb5d")) +
+  scale_color_manual(values = c("#5da2c9", "#c9bb5d")) +
+  scale_x_discrete(labels = c("Background SNPs", "Associated SNPs")) +
+  labs(y = "Mean r² within ±25 kb", x = "") +
+  theme_minimal(base_family = "roboto_condensed") +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(colour = "black"),
+    legend.position = "none"
+  )
+
+ggsave(diff_ld_background_associated,
+      filename=file.path(figures_path, "diff_ld_background_associated.png"),
+      width=4,
+      height=4)
+```
+
+```{r}
+
+assoc_chr10 <- assoc %>%
+  mutate(
+    chr_pos = sub(":.*", "", rs),
+    chr = sub("_.*", "", chr_pos),
+    pos = as.numeric(sub(".*_", "", chr_pos))
+  ) %>%
+  filter(
+    chr == "chr10",
+    pos >= 8059620,
+    pos <= 10425351
+  )
+
+assoc_sig <- assoc_chr10 %>%
+  filter(p_score < 5e-8)
+
+effect_summary <- assoc_sig %>%
+  summarise(
+    n_snps = n(),
+    mean_beta = mean(beta),
+    median_beta = median(beta),
+    min_beta = min(beta),
+    max_beta = max(beta),
+    mean_af = mean(af),
+    median_af = median(af),
+    min_af = min(af),
+    max_af = max(af)
+  )
+
+effect_summary
+
+phen_sd <- sd(phenotypes_clean$hatch_date, na.rm = TRUE)
+
+assoc_sig %>%
+  mutate(beta_sd = beta / phen_sd) %>%
+  summarise(
+    max_abs_beta_sd = max(abs(beta_sd)),
+    median_abs_beta_sd = median(abs(beta_sd)))
+```

@@ -1,0 +1,515 @@
+---
+title: "animal_model"
+author: "Andrea Estandia"
+date: "19/01/2026"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+# Knitr settings: 
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+options(scipen = 999)
+```
+
+```{r}
+source("./src/wm-gwas_source.R")
+```
+
+Read matrix, ids and phenotypes
+```{r}
+rel_file <- file.path(reports_path, "grm", "wm-gwas.qc.relatedness.rel")    
+id_file  <- file.path(reports_path, "grm", "wm-gwas.qc.relatedness.rel.id")  
+pheno_file <- file.path(data_path, "dfs","pheno_animal_model.csv") 
+
+# 2) read ids
+ids <- read.table(id_file, stringsAsFactors = FALSE)
+# Try to get vector of sample IDs (prefer IID or combined FID_IID)
+if(ncol(ids) >= 2) {
+  sample_ids <- ifelse(ids[,1]==ids[,2], ids[,1], paste(ids[,1], ids[,2], sep = "_"))
+  # If you actually used only IID in PLINK fam, you may prefer ids[,2]
+  sample_ids2 <- ids[,2]
+} else {
+  sample_ids <- ids[,1]
+  sample_ids2 <- ids[,1]
+}
+# We'll use sample_ids2 (IID) as default name vector; change if your phenotype IDs are "FID_IID"
+sample_ids <- sample_ids2
+
+# 3) read relatedness matrix (try common possible formats)
+rel_df <- try(read.table(rel_file, stringsAsFactors = FALSE, header = FALSE), silent = TRUE)
+if(inherits(rel_df, "try-error")) stop("Could not read relatedness file. Check path/format.")
+
+n_ids <- length(sample_ids)
+if(ncol(rel_df) == n_ids) {
+  # full square matrix: each row corresponds to an ID (in order of .rel.id)
+  G <- as.matrix(rel_df)
+  message("Read relatedness as full square matrix.")
+} else {
+  # Possibly PLINK produced lower-triangular (or upper). Attempt to reconstruct symmetric matrix.
+  # Many PLINK-style outputs are lower-triangular flattened: length = n(n+1)/2
+  flat_len <- nrow(rel_df) * ncol(rel_df)
+  if(flat_len == n_ids * (n_ids + 1) / 2) {
+    # flatten vector:
+    v <- as.numeric(unlist(rel_df))
+    G <- matrix(0, n_ids, n_ids)
+    idx <- 1
+    for(i in 1:n_ids){
+      for(j in 1:i){
+        G[i,j] <- v[idx]; G[j,i] <- v[idx]
+        idx <- idx + 1
+      }
+    }
+    message("Reconstructed symmetric matrix from lower-triangle style file.")
+  } else {
+    stop("Unrecognized relatedness file shape. Expected square matrix (n x n) or lower-triangle flattened (n(n+1)/2 entries). Inspect your file.")
+  }
+}
+
+# 4) label rows/cols and quick checks
+rownames(G) <- colnames(G) <- sample_ids
+
+# 5) optionally check symmetry numeric tolerance
+if(max(abs(G - t(G))) > 1e-6) {
+  warning("GRM not exactly symmetric; forcing symmetrize by (G + t(G))/2.")
+  G <- (G + t(G)) / 2
+}
+
+# 6) check positive-definiteness; if not, make near PD (sommer expects Gu to be PD)
+eigs <- eigen(G, symmetric = TRUE, only.values = TRUE)$values
+message(sprintf("GRM eigenvalues: max=%.4g min=%.4g", max(eigs), min(eigs)))
+if(min(eigs) < -1e-8) {
+  message("Small negative eigenvalues detected -> using Matrix::nearPD to get nearest positive-definite matrix.")
+  Gpd <- as.matrix(nearPD(G)$mat)
+  # re-scale to keep the same diagonal mean if desired (optional)
+  G <- Gpd
+  rownames(G) <- colnames(G) <- sample_ids
+}
+
+# 7) read phenotype file and merge with GRM ids
+pheno <- read.csv(pheno_file, stringsAsFactors = FALSE)
+# Ensure the id column matches the sample_id naming scheme; edit below if your pheno uses FID_IID vs IID
+# Example: if phenotype id is "id" and matches sample_ids, good. Otherwise create matching column.
+if(!"id" %in% colnames(pheno)) stop("phenotype file must have column named 'id' matching the IDs in the .rel.id file (IID).")
+
+# Filter to samples present both in pheno and GRM
+common_ids <- intersect(pheno$id, sample_ids)
+if(length(common_ids) == 0) stop("No overlapping IDs between phenotype file and GRM IDs. Check naming.")
+pheno <- pheno[pheno$id %in% common_ids, ]
+G_sub <- G[common_ids, common_ids]
+
+# 8) prepare data for sommer: factors and names
+pheno$animal <- as.factor(pheno$id)
+if(! "dam" %in% colnames(pheno)) stop("phenotype file must have column named 'dam' (mother ID).")
+pheno$maternal <- as.factor(pheno$dam)
+
+# 9) construct maternal Gu (identity matrix matching dam levels)
+mater_levels <- levels(pheno$maternal)
+n_mater <- length(mater_levels)
+Gu_mater <- diag(1, n_mater, n_mater)
+rownames(Gu_mater) <- colnames(Gu_mater) <- mater_levels
+
+# 10) make sure GRM row/col names are exactly the 'animal' levels expected by sommer
+# sommer expects Gu row/colnames matching the random term factor levels
+animal_levels <- pheno$animal
+# reorder G_sub to match pheno order (important)
+G_sub <- as.matrix(G_sub)
+G_sub <- G_sub[as.character(animal_levels), as.character(animal_levels)]
+
+# 11) Fit the animal model with sommer::mmer
+# Edit the formula: here I assume the trait is called 'trait' and we include sex and age as covariates if present.
+# If you don't have sex/age remove them from the formula.
+fixed_formula <- as.formula("trait ~ sex + age")  # CHANGE if different covariates or simpler: trait ~ 1
+# If 'sex' or 'age' don't exist in your pheno file, use trait ~ 1
+if(!("sex" %in% names(pheno)) && !("age" %in% names(pheno))) {
+  fixed_formula <- as.formula("trait ~ 1")
+} else {
+  # drop missing covariates if not present
+  covs <- c("sex","age")
+  covs_present <- covs[covs %in% names(pheno)]
+  fixed_formula <- as.formula(paste("trait ~", paste(covs_present, collapse = " + ")))
+}
+
+# 4. Remove rows with NA in any variable used in the model: trait, animal, maternal
+bad_idx <- is.na(pheno$trait) | is.na(pheno$animal) | is.na(pheno$maternal)
+cat("Removing", sum(bad_idx), "rows with NA in trait/animal/maternal.\n")
+if (length(bad_idx) == 0) {
+  pheno2 <- pheno
+} else {
+  pheno2 <- pheno[!bad_idx, , drop = FALSE]
+}
+
+# 5. Subset/reorder G_sub to the animals that remain in pheno2 (and ensure exact match)
+keep_animals <- as.character(pheno2$animal)
+if(!all(keep_animals %in% rownames(G_sub))) stop("Some remaining animals are not in the GRM. Check ID naming.")
+G_sub2 <- G_sub[keep_animals, keep_animals]
+
+# 6. Rebuild maternal Gu to match remaining maternal levels (if you used identity Gu earlier)
+pheno2$maternal <- droplevels(pheno2$maternal)
+mater_levels <- levels(pheno2$maternal)
+Gu_mater2 <- diag(1, length(mater_levels))
+rownames(Gu_mater2) <- colnames(Gu_mater2) <- mater_levels
+
+
+# 7. Quick sanity prints
+cat("N individuals for model:", nrow(pheno2), "\n")
+cat("N dams (maternal levels):", length(mater_levels), "\n")
+cat("Sample of animal levels:", head(as.character(pheno2$animal)), "\n")
+
+# 8. Finally run the minimal model
+
+fit <- mmer(
+  fixed  = pheno ~ 1,
+  random = ~ vs(animal, Gu = G_sub2) + vs(maternal, Gu = Gu_mater2),
+  rcov   = ~ units,
+  data   = pheno2,
+  verbose = TRUE
+)
+# 12) Summarize variance components & compute h2
+vc <- summary(fit)$varcomp
+print(vc)
+
+# compute proportions (you already did this but run to get numeric output)
+sigma_g <- vc[grep("animal", rownames(vc)), "VarComp"]
+sigma_m <- vc[grep("maternal", rownames(vc)), "VarComp"]
+sigma_e <- vc[grep("units", rownames(vc)), "VarComp"]
+
+total_V <- sigma_g + sigma_m + sigma_e
+h2_snp <- as.numeric(sigma_g / total_V)
+maternal_prop <- as.numeric(sigma_m / total_V)
+
+cat(sprintf("SNP-h2 (GRM) = %.4f\nMaternal proportion = %.4f\nResidual (units) = %.4f\nTotal variance = %.4f\n",
+            h2_snp, maternal_prop, sigma_e, total_V))
+
+
+# 13) Optional: bootstrap or approximate SEs using VCs from the model (sommer provides approximate SEs)
+# The summary() output usually includes SEs in the varcomp table
+# check that VarCompSE exists
+if("VarCompSE" %in% colnames(vc)) {
+
+  sigma_g  <- vc[grep("animal",   rownames(vc)), "VarComp"]
+  sigma_m  <- vc[grep("maternal", rownames(vc)), "VarComp"]
+  sigma_e  <- vc[grep("units",    rownames(vc)), "VarComp"]
+
+  se_g <- vc[grep("animal",   rownames(vc)), "VarCompSE"]
+  se_m <- vc[grep("maternal", rownames(vc)), "VarCompSE"]
+  se_e <- vc[grep("units",    rownames(vc)), "VarCompSE"]
+
+  cat(sprintf(
+    "\nVariance components (REML ± SE):\n  sigma_g = %.4f ± %.4f\n  sigma_m = %.4f ± %.4f\n  sigma_e = %.4f ± %.4f\n",
+    sigma_g, se_g, sigma_m, se_m, sigma_e, se_e
+  ))
+}
+
+
+# 14) save fitted object & results
+saveRDS(fit, file = "sommer_animal_model_fit.rds")
+write.csv(vc, file = "sommer_varcomp_table.csv", row.names = TRUE)
+cat("Saved fit object and varcomp table.\n")
+
+# 15) basic diagnostics
+# eigenvalues of G_sub (already printed above). Check leverage/hat values? Simple check:
+# fitted vs observed
+pheno2$pred <- predict(fit)$pvals[,1]    # predicted means (check shape)
+plot(pheno2$pheno, pheno2$pred, xlab="Observed trait", ylab="Predicted", main="Observed vs Predicted")
+
+
+var(pheno2$pheno)                # total observed variance (should equal total_V)
+plot(pheno2$pheno, pheno2$pred)  # if you computed pheno2$pred; else: pred <- predict(fit)$pvals[,1]
+
+summary(as.vector(G_sub2))
+eigs <- eigen(G_sub2, symmetric=TRUE, only.values=TRUE)$values
+summary(eigs); min(eigs); max(eigs)
+
+# animal only
+fit_a <- mmer(pheno~1, random=~ vs(animal,Gu=G_sub2), rcov=~units, data=pheno2)
+summary(fit_a)
+
+# maternal only
+fit_m <- mmer(pheno~1, random=~ maternal, rcov=~units, data=pheno2)
+summary(fit_m)
+
+table_counts <- table(pheno2$maternal); summary(table_counts)
+sum(table_counts==1)  # many singletons weakens maternal estimation
+
+# 1) check observed variance vs total_V
+var(pheno2$pheno)
+total_V  # you already have this
+
+# 2) GRM checks
+summary(as.vector(G_sub2))
+eigs <- eigen(G_sub2, symmetric=TRUE, only.values=TRUE)$values
+summary(eigs); min(eigs); max(eigs)
+
+# 3) refit animal-only
+fit_a <- mmer(pheno~1, random=~ vs(animal, Gu = G_sub2), rcov=~units, data=pheno)
+summary(fit_a)
+```
+
+```{r}
+# INLA
+# Clean INLA workflow: PLINK PCs OR GRM spectral -> INLA stack -> approximate h2 posterior
+# Edit file paths only if using PLINK PCs:
+eigs_file <- file.path(reports_path, "pca", "wm_animal_model.eigenval")    
+pcs_file  <- file.path(reports_path, "pca", "wm_animal_model.eigenvec")  
+pheno_file <- file.path(data_path, "dfs","pheno_animal_model.csv") 
+
+# ---- Prior tuning (user can edit) ----
+# prior_u: scale u used in PC prior P(sd > u) = prior_alpha
+# If NULL, script will set u = sd(trait) after loading phenotype.
+prior_u     <- NULL     # e.g. 1.0 or NULL to auto-set to sd(trait)
+prior_alpha <- 0.05     # default weak prior: P(sd > u) = 0.05
+
+# ---- Libraries ----
+library(data.table)
+library(Matrix)
+library(INLA)   # make sure your INLA installation is working
+
+# ---- 0) load phenotype ----
+ph <- fread(pheno_file, data.table = FALSE)
+# find id column if not named 'id'
+if(!"id" %in% colnames(ph)) {
+  alt <- intersect(c("IID","Iid","sample","Sample","ID","id1","ind","FID","fid"), colnames(ph))
+  if(length(alt) >= 1) {
+    ph$id <- as.character(ph[[alt[1]]])
+    message("Using phenotype ID column: ", alt[1], " -> ph$id")
+  } else stop("No ID column found in pheno. Add 'id' or common alternatives.")
+} else ph$id <- as.character(ph$id)
+
+# find trait column if not named 'trait'
+if(!"trait" %in% colnames(ph)) {
+  candidate <- intersect(c("trait","phenotype","pheno","y","value","height","weight"), colnames(ph))
+  if(length(candidate) >= 1) {
+    ph$trait <- as.numeric(ph[[candidate[1]]])
+    message("Using phenotype column: ", candidate[1], " -> ph$trait")
+  } else stop("No phenotype column found. Add column 'trait' or one of common names.")
+}
+
+# dam (maternal) column check
+if(!"dam" %in% colnames(ph)) stop("ph must contain a 'dam' column (maternal IDs).")
+
+message("Phenotypes loaded: n = ", nrow(ph), "  example ids: ", paste(head(ph$id,6), collapse=", "))
+
+# ---- Determine u for PC prior (weak prior) ----
+if(is.null(prior_u)) {
+  prior_u <- sd(ph$trait, na.rm = TRUE)
+  message("No prior_u provided -> using trait SD for u: ", round(prior_u, 6))
+} else {
+  message("Using user-specified prior_u = ", prior_u)
+}
+message("Using PC prior alpha = ", prior_alpha, "  (i.e. P(sd > u) = alpha)")
+
+# Build the PC prior object to use for maternal and idx
+# pc_prior_sd will be list(prec = list(prior = "pc.prec", param = c(u, alpha)))
+pc_prior_sd <- list(prec = list(prior = "pc.prec", param = c(prior_u, prior_alpha)))
+
+# ---- Determine workflow: prefer GRM if G_sub2 exists ----
+use_grm <- exists("G_sub2") && (is.matrix(G_sub2) || inherits(G_sub2, "Matrix"))
+if(use_grm) message("Detected G_sub2 in workspace -> using GRM spectral workflow.")
+if(!use_grm) message("No G_sub2 found -> will use PLINK PCs (check pcs_file/eigs_file)")
+
+# ---- Build A_mat: n x k mapping (individuals x latent PC/alpha) ----
+if(use_grm) {
+  ### GRM spectral construction (preferred) ###
+  G <- as.matrix(G_sub2)
+  if(is.null(rownames(G))) stop("G_sub2 needs rownames matching sample IDs.")
+  common <- intersect(ph$id, rownames(G))
+  if(length(common) == 0) stop("No overlap between ph$id and rownames(G_sub2). Fix IDs.")
+  # subset & order
+  ph <- ph[ ph$id %in% common, , drop = FALSE ]
+  G <- G[ ph$id, ph$id ]
+  n <- nrow(ph)
+  # eigendecompose (n ~ 500 OK; use RSpectra for larger)
+  eig <- eigen(G, symmetric = TRUE)
+  vals <- eig$values
+  vecs <- eig$vectors
+  # choose k (top components). default 500 or all positive eigenvalues
+  k <- min(500, length(vals))
+  keep <- which(vals[1:k] > 1e-8)
+  if(length(keep) == 0) stop("No positive eigenvalues found; check G_sub2.")
+  U_k <- vecs[, keep, drop = FALSE]       # n x k
+  Lambda_k <- vals[keep]
+  k <- length(keep)
+  message("GRM spectral: using k = ", k, " positive eigenvalues.")
+  # A_mat = U_k * sqrt(Lambda_k)
+  A_mat <- sweep(U_k, 2, sqrt(Lambda_k), FUN = "*")
+  A_mat <- as(Matrix(A_mat), "dgCMatrix")
+} else {
+  ### PLINK PCs construction ###
+  pcs_df <- fread(pcs_file, header = FALSE, data.table = FALSE)
+  eigs <- scan(eigs_file, quiet = TRUE)
+  if(ncol(pcs_df) < 3) stop("plink.eigenvec seems malformed. Expect FID IID PC1 PC2 ...")
+  rn_fid_iid <- paste0(as.character(pcs_df[,1]), "_", as.character(pcs_df[,2]))
+  rn_iid <- as.character(pcs_df[,2])
+  PCmat_full <- as.matrix(pcs_df[, 3:ncol(pcs_df), drop = FALSE])
+  rownames(PCmat_full) <- rn_fid_iid
+  PCmat_iid <- PCmat_full; rownames(PCmat_iid) <- rn_iid
+  # try matches
+  if(all(ph$id %in% rownames(PCmat_full))) {
+    PCmat_use <- PCmat_full[ph$id, , drop = FALSE]
+    message("Matched ph$id to PLINK FID_IID.")
+  } else if(all(ph$id %in% rownames(PCmat_iid))) {
+    PCmat_use <- PCmat_iid[ph$id, , drop = FALSE]
+    message("Matched ph$id to PLINK IID only.")
+  } else {
+    # try splitting ph$id on underscores/spaces and match last part to IID
+    ph_last <- sapply(strsplit(ph$id, "_| |:"), function(x) tail(x,1))
+    m <- match(ph_last, rownames(PCmat_iid))
+    sel <- !is.na(m)
+    if(sum(sel) == 0) stop("Could not match phenotype IDs to PLINK eigenvec rownames. Inspect IDs.")
+    PCmat_use <- PCmat_iid[m[sel], , drop = FALSE]
+    ph <- ph[sel, , drop = FALSE]
+    message("Matched ph$id (last part) to PLINK IID for ", nrow(ph), " samples.")
+  }
+  # choose k and scale by sqrt(eigenvalue)
+  k <- min(500, ncol(PCmat_use), length(eigs))
+  PCmat_k <- PCmat_use[, 1:k, drop = FALSE]
+  lambda_k <- eigs[1:k]
+  PCmat_scaled <- sweep(PCmat_k, 2, sqrt(lambda_k), FUN = "*")
+  A_mat <- as(Matrix(PCmat_scaled), "dgCMatrix")
+  message("PLINK-PC workflow: n=", nrow(A_mat), " k=", ncol(A_mat))
+}
+
+# ---- Build INLA stack ----
+n <- nrow(ph); k <- ncol(A_mat)
+if(n != nrow(A_mat)) stop("nrow(ph) and nrow(A_mat) must match.")
+
+# effects blocks
+effects_fixed <- data.frame(intercept = rep(1, n),
+                            maternal = as.factor(ph$dam),
+                            stringsAsFactors = FALSE)
+effects_alpha <- data.frame(idx = 1:k)
+
+# A matrices: A_identity maps observation-level effects (n rows in effects_fixed)
+A_identity <- Diagonal(n)
+stk <- inla.stack(data = list(y = ph$trait),
+                  A = list(A_identity, A_mat),
+                  effects = list(effects_fixed, effects_alpha),
+                  tag = "est")
+
+# ---- Priors: use the WEAK PC prior on SDs (tuned above) ----
+# Weaker than the original: P(sd > prior_u) = prior_alpha (default: prior_u = sd(trait), prior_alpha = 0.05)
+# pc_prior_sd already built earlier using prior_u/prior_alpha
+
+# formula: intercept fixed (-1 + intercept) + maternal (iid) + idx (iid latent PC coefs)
+formula <- y ~ -1 + intercept +
+           f(maternal, model = "iid", hyper = pc_prior_sd) +
+           f(idx, model = "iid", hyper = pc_prior_sd)
+
+# ---- Fit INLA ----
+res <- inla(formula,
+            data = inla.stack.data(stk),
+            family = "gaussian",
+            control.predictor = list(A = inla.stack.A(stk), compute = TRUE),
+            control.compute = list(dic = TRUE, waic = TRUE),
+            verbose = TRUE)
+
+# ---- Postprocessing: posterior mean g and sampled posterior h2 ----
+# posterior-mean alpha (length k)
+if("idx" %in% names(res$summary.random)) alpha_mean <- res$summary.random$idx$mean else alpha_mean <- rep(0, k)
+g_hat <- as.vector(A_mat %*% alpha_mean)
+var_g_hat <- as.numeric(var(g_hat))
+
+# show hyperparameter table and names (for mapping)
+hp_names <- names(res$marginals.hyperpar)
+message("Hyperparameter names (INLA order):"); print(hp_names)
+hp_table <- res$summary.hyperpar
+print(hp_table)
+
+# identify maternal/residual/idx positions (try heuristics)
+mater_idx <- which(grepl("maternal", hp_names, ignore.case = TRUE))
+resid_idx  <- which(grepl("Gaussian observations", hp_names, ignore.case = TRUE) |
+                    grepl("precision.*observ", hp_names, ignore.case = TRUE))
+idx_idx    <- which(grepl("idx", hp_names, ignore.case = TRUE) |
+                    grepl("alpha", hp_names, ignore.case = TRUE) |
+                    grepl("pc", hp_names, ignore.case = TRUE))
+
+# Point estimates by inverting mean precisions (quick)
+prec_means <- hp_table[,"mean"]; names(prec_means) <- hp_names
+var_from_prec_mean <- 1 / prec_means
+var_maternal <- if(length(mater_idx)==1) var_from_prec_mean[mater_idx] else var(res$summary.random$maternal$mean)
+var_residual <- if(length(resid_idx)==1) var_from_prec_mean[resid_idx] else NA
+totalV_point <- var_g_hat + var_maternal + var_residual
+h2_point <- var_g_hat / totalV_point
+mater_point <- var_maternal / totalV_point
+
+cat("\nPoint approx (1/mean-precision):\n")
+cat(sprintf(" var_g_hat=%.6g\n var_maternal=%.6g\n var_residual=%.6g\n totalV=%.6g\n h2=%.4f\n maternal_prop=%.4f\n",
+            var_g_hat, var_maternal, var_residual, totalV_point, h2_point, mater_point))
+
+# ---- Proper posterior sampling for h2 (sample alphas and precisions) ----
+set.seed(2025)
+nsamp <- 2000   # increase for smoother posteriors if you have RAM/time
+# 1) sample alpha marginals (res$marginals.random$idx is list of k marginals)
+if(!is.null(res$marginals.random$idx)) {
+  # pre-allocate
+  alpha_samples <- matrix(NA_real_, nrow = nsamp, ncol = k)
+  for(j in seq_len(k)) {
+    alpha_samples[, j] <- inla.rmarginal(nsamp, res$marginals.random$idx[[j]])
+  }
+  # compute g_samples chunkwise to avoid huge memory: we will compute var(g) per sample
+  # var_g_samples[i] = var( A_mat %*% alpha_samples[i, ] )
+  var_g_samples <- numeric(nsamp)
+  A_dense <- as.matrix(A_mat)  # n x k (n ~ 500 so OK)
+  for(i in seq_len(nsamp)) {
+    g_samp <- A_dense %*% alpha_samples[i, ]
+    var_g_samples[i] <- var(g_samp)
+  }
+} else {
+  # fallback: no alpha marginals returned
+  var_g_samples <- rep(var_g_hat, nsamp)
+}
+
+# 2) sample precisions -> variances
+samp_prec_list <- lapply(res$marginals.hyperpar, function(m) inla.rmarginal(nsamp, m))
+samp_var_list  <- lapply(samp_prec_list, function(x) 1 / x)
+names(samp_var_list) <- hp_names
+
+# maternal & residual samples
+samp_var_maternal <- if(length(mater_idx)==1) samp_var_list[[mater_idx]] else rep(var_maternal, nsamp)
+samp_var_resid     <- if(length(resid_idx)==1) samp_var_list[[resid_idx]] else rep(var_residual, nsamp)
+
+# compose posterior h2 samples
+post_total <- var_g_samples + samp_var_maternal + samp_var_resid
+post_h2 <- var_g_samples / post_total
+post_mater <- samp_var_maternal / post_total
+
+# print posterior summaries
+cat("\nPosterior summaries (INLA sampling):\n")
+print(c(h2_mean = mean(post_h2), h2_median = median(post_h2),
+        h2_2.5 = quantile(post_h2, 0.025), h2_97.5 = quantile(post_h2, 0.975)))
+print(c(mater_mean = mean(post_mater), mater_median = median(post_mater),
+        mater_2.5 = quantile(post_mater, 0.025), mater_97.5 = quantile(post_mater, 0.975)))
+
+# diagnostic plots
+# require ggplot2 + patchwork 
+library(ggplot2)
+library(patchwork)
+
+# prepare data frames
+df_h2    <- data.frame(value = post_h2)
+df_mater <- data.frame(value = post_mater)
+
+# hist + density for h2
+p_h2 <- ggplot(df_h2, aes(x = value)) +
+  geom_histogram(aes(y = ..density..), bins = 80, alpha = 0.6) +
+  geom_density(size = 0.6) +
+  labs(title = "Posterior h2 (INLA)", x = "h2", y = "Density") +
+  theme_minimal(base_size = 12)
+
+# hist + density for maternal proportion
+p_mater <- ggplot(df_mater, aes(x = value)) +
+  geom_histogram(aes(y = ..density..), bins = 80, alpha = 0.6) +
+  geom_density(size = 0.6) +
+  labs(title = "Posterior maternal proportion", x = "maternal prop", y = "Density") +
+  theme_minimal(base_size = 12)
+
+# show side-by-side
+(p_h2 | p_mater) + plot_layout(guides = "collect")
+
+# save key objects to disk (optional)
+saveRDS(list(res = res, ph = ph, A_mat = A_mat, post_h2 = post_h2, post_mater = post_mater),
+        file = "inla_heritability_results.rds")
+```

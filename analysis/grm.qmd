@@ -1,0 +1,175 @@
+---
+title: "grm"
+author: "Andrea Estandia"
+date: "25/10/2025"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+# Knitr settings: 
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+options(scipen = 999)
+```
+
+```{r}
+source("./src/wm-gwas_source.R")
+```
+
+```{r}
+rel <- as.matrix(read.table(file.path(reports_path, "grm", "wm-gwas.qc.relatedness.rel")))
+
+id <- read.table(file.path(reports_path, "grm", "wm-gwas.qc.relatedness.rel.id"))
+
+colnames(rel) <- id$V2
+rownames(rel) <- id$V2
+
+# Convert matrix to long format
+rel_df <- as.data.frame(rel) %>%
+  tibble::rownames_to_column("ID1") %>%
+  pivot_longer(
+    cols = -ID1,
+    names_to = "ID2",
+    values_to = "relatedness"
+  )
+
+rel_df$relatedness_plot <- pmax(rel_df$relatedness, 0)
+# ggplot heatmap
+heatmap_plot <- ggplot(rel_df, aes(ID1, ID2, fill = relatedness_plot)) +
+  geom_tile() +
+  scale_fill_viridis_c(
+    name = "Genomic relatedness",
+    option = "magma",
+    direction=-1
+  ) +
+  theme_minimal(base_family = "roboto_condensed") +
+  theme(
+    axis.text = element_blank(),
+    axis.title = element_blank(), 
+    legend.position="bottom"
+  )
+
+
+# Save to file
+ggsave(heatmap_plot, filename=file.path(figures_path, "heatmap_rel.png"), width = 5, height =5, dpi = 300)
+```
+
+PCA
+```{r}
+eigenvalues <- read.table(file.path(
+  reports_path,
+  "pca",
+  "wm-gwas.pca.eigenval"
+))
+
+total_variance <- sum(eigenvalues$V1)
+variance_explained <- (eigenvalues$V1 / total_variance) * 100
+
+pca <- read.table(file.path(reports_path, "pca", "wm-gwas.pca.eigenvec"), header=T) %>%
+mutate(FID = sub("_.*$", "", IID))
+
+FID_colors <- c(
+  "14291" = "#e0a44a",  # orange
+  "K6"    = "#e6c649",  # yellow
+  "L3"    = "#5f9aa1",  # blue
+  "H4"    = "#97ad63",  # green
+  "L4"    = "#b57b9c",  # pink
+  "N8"    = "#6a719c",  # deep blue
+  "P7"    = "#d97575",  # red-orange
+  "17321" = "#999999"   # gray
+)
+
+library(scales)
+
+FID_palette_84 <- colorRampPalette(
+  FID_colors,
+  space = "Lab"   # perceptually uniform
+)(84)
+
+families <- sort(unique(pca$FID))
+
+FID_colors_84 <- setNames(
+  FID_palette_84[seq_along(families)],
+  families
+)
+
+pc1_pc2 <- 
+pca %>%
+ggplot(aes(PC1, PC2, col=FID)) +
+  geom_point() +
+  scale_colour_manual(values = FID_colors_84)+
+  theme_minimal(base_family = "roboto_condensed") +
+  theme(
+    plot.background = element_rect(fill = "transparent", color = NA),
+    panel.grid = element_blank(),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    text = element_text(family = "roboto_condensed",size=14),
+    axis.text = element_text(size = 13),
+    legend.position = "none"
+  ) +
+  annotate(
+    "text",
+    x = min(pca$PC1), 
+    y = min(pca$PC2)+0.05,
+    label = "F70",
+    hjust = 0,
+    vjust = 0,
+    size = 5,
+    fontface = "bold"
+  ) +
+  annotate(
+    "text",
+    x = max(pca$PC1)-0.05,
+    y = max(pca$PC2),
+    label = "F64",
+    hjust = 1,
+    vjust = 1,
+    size = 5,
+    fontface = "bold"
+  )+
+  labs(x = "\nPC1 (12.31%)", y = "PC2 (12.03%)\n")
+
+pc3_pc4 <- 
+pca %>%
+ggplot(aes(PC3, PC4, col=FID)) +
+  geom_point() +
+  scale_colour_manual(values = FID_colors_84)+
+  theme_minimal(base_family = "roboto_condensed") +
+  theme(
+    plot.background = element_rect(fill = "transparent", color = NA),
+    panel.grid = element_blank(),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    text = element_text(family = "roboto_condensed",size=14),
+    axis.text = element_text(size = 13),
+    legend.position = "none"
+  ) +
+    annotate(
+    "text",
+    x = mean(pca$PC3)-0.17, 
+    y = min(pca$PC4)+0.05,
+    label = "F68",
+    hjust = 0,
+    vjust = 0,
+    size = 5,
+    fontface = "bold"
+  ) +
+  annotate(
+    "text",
+    x = min(pca$PC3)+0.15,
+    y = max(pca$PC4),
+    label = "F52",
+    hjust = 1,
+    vjust = 1,
+    size = 5,
+    fontface = "bold"
+  )+
+  labs(x = "\nPC3 (10.57%)", y = "PC4 (10.19%)\n")
+
+combined <- heatmap_plot+pc1_pc2+pc3_pc4+plot_annotation(tag_levels="A")
+
+ggsave(combined, filename=file.path(figures_path, "heatmap_rel.png"), width = 12, height =5, dpi = 300)
+```

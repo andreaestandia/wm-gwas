@@ -41,6 +41,7 @@ bonf <- -log10(0.00005 / nrow(assoc2))
 # prepare plot_df (only points above threshold)
 plot_df <- assoc2 %>%
   mutate(chr = ifelse(is.na(chr) | chr == "", str_extract(rs, "^[^_:\\s]+"), chr)) %>%
+  filter(!grepl("^scaffold", chr)) %>% 
   filter(-log10(p_score_safe) > 1) %>%
   mutate(
     n = as.integer(n),                            # ensure numeric
@@ -52,7 +53,7 @@ plot_df <- assoc2 %>%
 # build axisdf: midpoint for each chr on the numeric n scale
 axisdf <- plot_df %>%
   group_by(chr) %>%
-  summarize(x = (min(n) + max(n)) / 2) %>%
+  summarize(x = (min(n) + max(n)) / 2)  %>%
   ungroup()
 
 # final plot: x = n (numeric), with custom breaks/labels from axisdf
@@ -75,13 +76,6 @@ ggsave(manhattan_plot,
       filename=file.path(figures_path, "manhattan_plot_GLs_filtered.png"),
       width=12,
       height=3)
-```
-
-```{r}
-assoc2 %>%
-  slice_max(order_by = -log10(p_score), n = 100) %>%
-  filter(chr=="chr10") %>%
-  arrange(n)
 
 ```
 
@@ -279,14 +273,14 @@ gts_long <- gts %>%
 
 # Keep only families with >1 genotype for this SNP
 families_with_variation <- gts_long %>%
-  filter(chr_pos == "chr10_9141439", genotype != "NA") %>%
+  filter(chr_pos == "chr10_9107590", genotype != "NA") %>%
   group_by(FID) %>%
   summarise(n_genotypes = n_distinct(genotype)) %>%
   filter(n_genotypes > 1) %>%
   pull(FID)
 
 families_without_variation <- gts_long %>%
-  filter(chr_pos == "chr10_9141439", genotype != "NA") %>%
+  filter(chr_pos == "chr10_9107590", genotype != "NA") %>%
   group_by(FID) %>%
   summarise(n_genotypes = n_distinct(genotype)) %>%
   filter(n_genotypes == 1) %>%
@@ -294,7 +288,7 @@ families_without_variation <- gts_long %>%
 
 plot_effect_outliers_pheno_family <- 
   gts_long %>%
-  filter(chr_pos == "chr10_9141439",
+  filter(chr_pos == "chr10_9107590",
          genotype != "NA",
          FID %in% families_with_variation) %>%   # <-- keep only informative families
   mutate(genotype = factor(genotype, levels = c("0/0", "0/1", "1/1"))) %>%
@@ -352,9 +346,9 @@ tab <- gts_long %>%
 
 tab
 
-
 plot_effect_outliers_pheno <-
   gts_long %>%
+  filter(genotype!="./.")%>%
   separate(chr_pos, into = c("chr", "pos"), sep = "_", convert = TRUE, remove = FALSE) %>%
   filter(!is.na(genotype)) %>%                     # safer than genotype != "NA"
   filter(chr == "chr10") %>%
@@ -368,7 +362,7 @@ plot_effect_outliers_pheno <-
     scale_color_manual(values = c("0/0" = "#60a0d1",
                                   "0/1" = "#d1be60",
                                   "1/1" = "#e6584e")) +
-    facet_wrap(~ chr_pos, scales = "free_x") +
+    facet_wrap(~ chr_pos, scales = "free_y") +
     theme_minimal(base_family = "roboto_condensed") +
     theme(
       panel.grid = element_blank(),
@@ -377,5 +371,190 @@ plot_effect_outliers_pheno <-
       axis.title = element_text(size = 12)
     ) +
     labs(x = "\nGenotype\n", y = "\nHatching date\n")
+
+```
+
+Plot a single SNP and show family variation
+```{r}
+# 1) pick ONE SNP (most frequent on chr10, excluding missing)
+one_snp <- gts_long %>%
+  filter(genotype != "./.") %>%
+  separate(chr_pos, into = c("chr", "pos"), sep = "_", convert = TRUE, remove = FALSE) %>%
+  filter(chr == "chr10") %>%
+  count(chr_pos) %>%
+  filter(chr_pos == "chr10_9107590") %>%
+  pull(chr_pos)
+
+one_snp
+# e.g. "chr10_9107590"
+
+subset_families <- gts_long %>%
+  filter(genotype != "./.") %>%
+  separate(chr_pos, into = c("chr", "pos"), sep = "_", convert = TRUE, remove = FALSE) %>%
+  filter(chr_pos == one_snp) %>%
+  mutate(genotype = factor(genotype, levels = c("0/0", "0/1", "1/1"))) %>%
+  group_by(FID) %>%
+  filter(n_distinct(genotype, na.rm = TRUE) > 1) %>%   # <-- key change
+  ungroup() %>%
+  filter(FID!="F57" & FID!="F69" & FID!="F157" & FID!="F180" & FID!="F110" & FID!="F144" & FID!="F67" & FID!="F38" & FID!="F167" & FID!="F23")
+
+
+# 2) plot by family (FID)
+plot_one_snp_by_fid_var1 <- subset_families %>%
+  ggplot(aes(x = genotype, y = hatch_date, color = genotype)) +
+  geom_jitter(width = 0.15, alpha = 0.8, size = 2) +
+  stat_summary(fun.data = mean_cl_normal,
+               geom = "pointrange",
+               color = "black",
+               size = 0.5) +
+  scale_color_manual(values = c("0/0" = "#60a0d1",
+                                "0/1" = "#d1be60",
+                                "1/1" = "#e6584e")) +
+  facet_wrap(~ FID, scales = "free_y") +
+  theme_minimal(base_family = "roboto_condensed") +
+  theme(
+    panel.grid = element_blank(),
+    strip.text = element_text(size = 12, face = "bold"),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12),
+    legend.position="none"
+  ) +
+  labs(
+    title = paste("Top SNP:", one_snp),
+    x = "\nGenotype\n",
+    y = "\nHatching date\n"
+  )
+
+plot_one_snp_by_fid_var1
+
+ggsave(plot_one_snp_by_fid_var1,
+      filename=file.path(figures_path, "one_snp_by_fid_var.png"),
+      width=6,
+      height=7)
+
+```
+
+
+```{r}
+# 1) pick ONE SNP (most frequent on chr10, excluding missing)
+one_snp <- gts_long %>%
+  filter(genotype != "./.") %>%
+  separate(chr_pos, into = c("chr", "pos"), sep = "_", convert = TRUE, remove = FALSE) %>%
+  filter(chr == "chr10") %>%
+  count(chr_pos) %>%
+  filter(chr_pos == "chr10_9149881") %>%
+  pull(chr_pos)
+
+one_snp
+# e.g. "chr10_9107590"
+
+subset_families <- gts_long %>%
+  filter(genotype != "./.") %>%
+  separate(chr_pos, into = c("chr", "pos"), sep = "_", convert = TRUE, remove = FALSE) %>%
+  filter(chr_pos == one_snp) %>%
+  mutate(genotype = factor(genotype, levels = c("0/0", "0/1", "1/1"))) %>%
+  group_by(FID) %>%
+  filter(n_distinct(genotype, na.rm = TRUE) > 1) %>%   # <-- key change
+  ungroup() %>%
+  filter(FID!="F76" & FID!="F69" & FID!="F57" & FID!="F105" & FID!="F110" & FID!="F116" & FID!="F23" & FID!="F63" & FID!="F67" & FID!="F81" & FID!="F63")
+  
+
+# 2) plot by family (FID)
+plot_one_snp_by_fid_var2 <- subset_families %>%
+  ggplot(aes(x = genotype, y = hatch_date, color = genotype)) +
+  geom_jitter(width = 0.15, alpha = 0.8, size = 2) +
+  stat_summary(fun.data = mean_cl_normal,
+               geom = "pointrange",
+               color = "black",
+               size = 0.5) +
+  scale_color_manual(values = c("0/0" = "#60a0d1",
+                                "0/1" = "#d1be60",
+                                "1/1" = "#e6584e")) +
+  facet_wrap(~ FID, scales = "free_y") +
+  theme_minimal(base_family = "roboto_condensed") +
+  theme(
+    panel.grid = element_blank(),
+    strip.text = element_text(size = 12, face = "bold"),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12),
+    legend.position="none"
+  ) +
+  labs(
+    title = paste(one_snp),
+    x = "\nGenotype\n",
+    y = "\nHatching date\n"
+  )
+
+plot_one_snp_by_fid_var1_2 <- plot_one_snp_by_fid_var1+plot_one_snp_by_fid_var2
+
+ggsave(plot_one_snp_by_fid_var1_2,
+      filename=file.path(figures_path, "one_snp_by_fid_var1-2.png"),
+      width=12,
+      height=7)
+
+```
+
+
+Tile plot
+```{r}
+# 1. encode genotypes as numeric (0,1,2)
+gts_enc <- gts_long %>%
+  mutate(gt_code = case_when(
+    genotype == "0/0" ~ 0,
+    genotype == "0/1" ~ 1,
+    genotype == "1/1" ~ 2,
+    TRUE              ~ NA_real_
+  ))
+
+
+# 2. wide matrix: rows = IID, cols = chr_pos
+mat <- gts_enc %>%
+  dplyr::select(IID, chr_pos, gt_code) %>%
+  pivot_wider(names_from = chr_pos, values_from = gt_code) %>%
+  arrange(IID)
+
+# keep IID separately then make numeric matrix
+iids <- mat$IID
+nummat <- mat %>% dplyr::select(-IID) %>% as.matrix()
+
+# 3. Handle NAs: replace column-wise with column mean (other options noted below)
+col_means <- colMeans(nummat, na.rm = TRUE)
+# If a column is all NA, replace NA mean with 0
+col_means[is.na(col_means)] <- 0
+# replace NAs
+for (j in seq_len(ncol(nummat))) {
+  nas <- is.na(nummat[, j])
+  if (any(nas)) nummat[nas, j] <- col_means[j]
+}
+
+# 4. distance and clustering
+d <- dist(nummat, method = "euclidean")    # other methods possible
+hc <- hclust(d, method = "average")        # try "ward.D2" too
+iid_order <- iids[hc$order]
+
+# 5. set factor order in original long dataframe and plot
+gts_long_ord <- gts_enc %>%
+  separate(chr_pos, into = c("chr", "pos"), sep = "_", remove = FALSE) %>%
+  mutate(
+    pos = as.numeric(pos),
+    chr = factor(chr, levels = gtools::mixedsort(unique(chr)))  # or sort(unique(chr))
+  ) %>%
+  arrange(chr, pos) %>%
+  mutate(
+    chr_pos = factor(chr_pos, levels = unique(chr_pos)),
+    IID = factor(IID, levels = iid_order)
+  )
+
+ggplot(gts_long_ord, aes(x = chr_pos, y = IID, fill = genotype)) +
+  geom_tile(color = "grey70") +
+  scale_fill_manual(values = c("0/0" = "#67a9c7", "0/1" = "#cc5135", "1/1" = "#d4c146")) +
+  labs(x = "\nLocus (chr_pos)", y = "\nIndividual", fill = "Genotype") +
+  theme_minimal(base_family = "roboto_condensed") +
+  theme(
+    panel.grid = element_blank(),                      
+    axis.text.x = element_text(hjust = 1, angle=45, family = "roboto_condensed"),
+    axis.title = element_text(family = "roboto_condensed"),
+    legend.position = "none"
+  )
 
 ```
