@@ -1,0 +1,180 @@
+---
+title: "plot_manhattan"
+author: "Andrea Estandia"
+date: "06/10/2025"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+# Knitr settings: 
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+options(scipen = 999)
+```
+
+```{r}
+source("./src/wm-gwas_source.R")
+```
+
+```{r}
+assoc <- data.table::fread(file.path(reports_path, "gwas", "wm-gwas.gemma_GLs_filtered.assoc.txt"))
+
+assoc$n <- 1:nrow(assoc)
+```
+
+```{r}
+assoc2 <- assoc %>%
+  mutate(
+    chr = str_extract(rs, "^[^_:\\s]+"),   # first chunk e.g. "chr1"
+    n   = row_number(),
+    p_score_safe = pmax(p_score, 1e-300)
+  )
+
+```
+
+```{r}
+# recompute bonf 
+bonf <- -log10(0.05 / nrow(assoc2))
+
+# prepare plot_df (only points above threshold)
+plot_df <- assoc2 %>%
+  mutate(chr = ifelse(is.na(chr) | chr == "", str_extract(rs, "^[^_:\\s]+"), chr)) %>%
+  filter(!grepl("^scaffold", chr)) %>% 
+  filter(-log10(p_score_safe) > 1) %>%
+  mutate(
+    n = as.integer(n),                            # ensure numeric
+    chr = factor(chr, levels = unique(chr)),      # keep encountered order
+    chr_idx = as.integer(chr),
+    point_col = ifelse(chr_idx %% 2 == 1, "#5a798f", "#2a3740")
+  )
+
+# build axisdf: midpoint for each chr on the numeric n scale
+axisdf <- plot_df %>%
+  group_by(chr) %>%
+  summarize(x = (min(n) + max(n)) / 2)  %>%
+  ungroup()
+
+# final plot: x = n (numeric), with custom breaks/labels from axisdf
+a <-
+ggplot(plot_df, aes(x = n, y = -log10(p_score_safe))) +
+  geom_jitter(aes(color = point_col), width = 0.18, height = 0, size = 1.8, show.legend = FALSE) +
+  geom_hline(yintercept = bonf, linetype = "dashed") +
+  scale_color_identity() +
+  scale_x_continuous(breaks = axisdf$x, labels = axisdf$chr, expand = expansion(mult = c(0.01, 0.01))) +
+  theme_minimal(base_family = "roboto_condensed") +
+  theme(
+    text = element_text(size = 36),
+    panel.grid = element_blank(),                      # remove grid entirely
+    axis.text.x = element_text(size = 36, hjust = 1, family = "roboto_condensed"),
+    axis.text.y = element_text(size = 36, family = "roboto_condensed"),
+    axis.title  = element_text(size = 42, family = "roboto_condensed"),
+    legend.position = "none"
+  ) +labs(x = " ", y = expression(-log[10](p[score])))
+
+```
+
+
+```{r}
+# prepare p-values (avoid 0)
+qq_df <- assoc2 %>%
+  mutate(pval = pmax(p_score_safe, 1e-300)) %>%
+  arrange(pval) %>%
+  mutate(
+    observed = -log10(pval),
+    expected = -log10(ppoints(n()))   # expected under Uniform(0,1)
+  )
+
+# make QQ plot
+b <- ggplot(qq_df, aes(x = expected, y = observed)) +
+  geom_point(size = 1.5, colour = "#5a798f") +
+  geom_abline(intercept = 0, slope = 1, colour = "#2a3740", linetype = "dashed") +
+  labs(
+    x = expression(Expected~~-log[10](italic(p))),
+    y = expression(Observed~~-log[10](italic(p))),
+    title = ""
+  ) +
+  theme_minimal(base_family = "roboto_condensed") +
+  theme(
+    text = element_text(size = 36),
+    axis.text = element_text(size = 36),
+    panel.grid = element_blank(),
+    plot.title = element_text(hjust = 0.5, family = "roboto_condensed")
+  )
+```
+
+
+```{r}
+c <- create_manhattan_plot("chr10", 7049620, 10925351, plot_df, axisdf, bonf)
+
+pheno <- read.table(file.path(data_path, "dfs", "pheno.txt"), header=T)
+sex <- read.csv(file.path(data_path, "dfs", "sex.csv"), header=T)
+
+gts <- read.table(file.path(reports_path, "gwas", "all_sites.tsv"), header=T) %>%
+left_join(pheno, by="IID") %>% left_join(sex, by="IID")
+
+gts_long <- gts %>%
+    mutate(
+    FID = sub("_.*", "", IID)) %>%
+  pivot_longer(
+    cols = starts_with("chr"),
+    names_to = "chr_pos",
+    values_to = "genotype"
+  )
+
+d <-
+  gts_long %>%
+  filter(genotype!="./.")%>%
+  filter(chr_pos == "chr10_9107590") %>%
+  separate(chr_pos, into = c("chr", "pos"), sep = "_", convert = TRUE, remove = FALSE) %>%
+  filter(!is.na(genotype)) %>%                     # safer than genotype != "NA"
+  filter(chr == "chr10") %>%
+  mutate(genotype = factor(genotype, levels = c("0/0", "0/1", "1/1"))) %>%
+  ggplot(aes(x = genotype, y = hatch_date, color = genotype)) +
+    geom_jitter(width = 0.15, alpha = 0.8, size = 2) +
+    stat_summary(fun.data = mean_cl_normal,
+                 geom = "pointrange",
+                 color = "black",
+                 size = 0.5) +
+    scale_color_manual(values = c("0/0" = "#60a0d1",
+                                  "0/1" = "#d1be60",
+                                  "1/1" = "#e6584e")) +
+  scale_x_discrete(
+  labels = c(
+    "0/0" = "CC",
+    "0/1" = "CT",
+    "1/1" = "TT"
+  )
+)+
+    theme_minimal(base_family = "roboto_condensed") +
+    theme(
+      text = element_text(size = 36),
+      panel.grid = element_blank(),
+      axis.text = element_text(size = 36),
+      legend.position="none"
+    ) +
+    labs(x = "Genotype", y = "\nHatching date\n", title="")
+
+chr10_ld <- create_ld_plot("chr10")
+e <- chr10_ld$plot
+
+bottom <- (b +
+           c +
+           d +
+           e) +
+  plot_layout(
+    ncol = 4,
+    widths = c(1, 1, 0.7, 1),
+    guides = "collect"
+  )
+
+final <- a / bottom +
+  plot_layout(heights = c(0.8, 1.2)) +
+  plot_annotation(tag_levels = "A")
+
+ggsave(final,
+      filename=file.path(figures_path, "fig1.png"),
+      width=12,
+      height=6)
+```
