@@ -1,0 +1,319 @@
+---
+title: "explore_region"
+author: "Andrea Estandia"
+date: "11/11/2025"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+# Knitr settings: 
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+options(scipen = 999)
+```
+
+```{r}
+source("./src/wm-gwas_source.R")
+```
+
+## SV genotyping from read depth (chr10:9,102,316-9,108,300)
+
+Read depth in the ~5.9 kb primary-only gap region, normalised by flanking anchor
+depth, gives a per-individual proxy for which haplotype(s) they carry at the
+structural variant locus:
+  - `sv_ratio ≈ 1.0`  →  primary/primary  (0|0)
+  - `sv_ratio ≈ 0.5`  →  heterozygous      (0|1)
+  - `sv_ratio ≈ 0.0`  →  alt/alt           (1|1)
+
+Run on the cluster first:
+```bash
+# On the cluster – adjust BAM_DIR to your bam directory
+bash analysis/pipeline/8_sv_depth_genotype.sh /path/to/bam_dir \
+     reports/structural_variant/chr10_9064949_9205154/sv_depth.tsv
+```
+
+```{r sv-depth-load}
+pheno <- read.table(
+  file.path(data_path, "dfs", "pheno.txt"), header=T) %>%
+  dplyr::select(IID, FID, hatch_date)
+
+sv_per_sample_dir <- file.path(
+  reports_path,
+  "structural_variant", "sv_depth_per_sample"
+)
+
+sv_files <- list.files(sv_per_sample_dir, pattern = "\\.tsv$", full.names = TRUE)
+stopifnot("No per-sample TSV files found" = length(sv_files) > 0)
+
+sv <- lapply(sv_files, read.table, header = TRUE, sep = "\t", na.strings = "NA") %>%
+  bind_rows() %>%
+  left_join(pheno, by = c("sample" = "IID")) %>%
+  left_join(sex,   by = c("sample" = "IID"))
+
+cat(sprintf("Loaded %d samples from %s\n", nrow(sv), sv_per_sample_dir))
+```
+
+```{r sv-depth-classify}
+focal_samples <- c(
+  "F10_1", "F10_2", "F10_3", "F10_5", "F10_9", "F105_7", "F105_8",
+  "F110_1", "F116_5", "F116_6", "F116_9", "F118_19", "F118_2", "F118_20",
+  "F118_3", "F118_9", "F126_13", "F126_14", "F126_2", "F126_5", "F135_11",
+  "F135_16", "F135_17", "F135_19", "F135_3", "F138_1", "F138_11", "F138_12",
+  "F138_6", "F140_11", "F140_13", "F140_14", "F140_18", "F140_20", "F145_13",
+  "F145_15", "F145_16", "F145_19", "F145_3", "F148_10", "F148_11", "F148_12",
+  "F148_13", "F148_4", "F15_14", "F15_4", "F157_1", "F157_13", "F157_6",
+  "F159_2", "F159_3", "F159_4", "F159_9", "F165_3", "F170_1", "F170_14",
+  "F170_18", "F170_5", "F180_11", "F180_2", "F180_3", "F180_4", "F20_2",
+  "F23_11", "F23_18", "F23_2", "F25_11", "F25_12", "F25_3", "F25_4",
+  "F37_11", "F38_10", "F42_16", "F44_12", "F44_14", "F44_4", "F44_5",
+  "F44_8", "F46_11", "F46_13", "F50_16", "F50_20", "F50_3", "F56_11",
+  "F56_9", "F57_1", "F57_3", "F63_4", "F63_6", "F63_9", "F64_1",
+  "F64_11", "F64_3", "F64_6", "F67_10", "F67_11", "F69_19", "F69_20",
+  "F81_2", "F81_5", "F86_20", "F86_9", "F95_12", "F95_14", "F95_3", "F95_4"
+)
+
+# ── Classify SV genotype from depth ratio ──────────────────────────────────
+# Boundaries between genotype classes (adjust if needed after inspection)
+HOM_ALT_UPPER  <- 0.20   # ratio < 0.20  → alt/alt
+HOM_PRIM_LOWER <- 0.80   # ratio > 0.80  → primary/primary
+# between 0.20 and 0.80  → heterozygous
+
+sv <- sv %>%
+  mutate(
+    sv_genotype = case_when(
+      is.na(sv_ratio)            ~ NA_character_,
+      sv_ratio < HOM_ALT_UPPER   ~ "alt/alt",
+      sv_ratio > HOM_PRIM_LOWER  ~ "prim/prim",
+      TRUE                       ~ "het"
+    ),
+    sv_genotype = factor(sv_genotype, levels = c("prim/prim", "het", "alt/alt"))
+  ) %>%
+  mutate(is_focal = sample %in% focal_samples)
+
+# Summary table
+sv %>%
+  count(sv_genotype) %>%
+  mutate(freq = n / sum(n))
+```
+
+```{r sv-depth-plot}
+pal_sv <- c("prim/prim" = "#3A78B5", "het" = "#9B59B6", "alt/alt" = "#E07A1E")
+
+# ── 1. Histogram of sv_ratio coloured by inferred genotype ────────────────
+p_hist <- sv %>%
+  filter(!is.na(sv_ratio)) %>%
+  ggplot(aes(x = sv_ratio, fill = sv_genotype)) +
+  geom_histogram(binwidth = 0.05, colour = "white", linewidth = 0.3) +
+  geom_vline(xintercept = c(HOM_ALT_UPPER, HOM_PRIM_LOWER),
+             linetype = "dashed", colour = "grey40", linewidth = 0.7) +
+  scale_fill_manual(values = pal_sv, na.value = "grey70",
+                    name = "SV genotype") +
+  labs(
+    title    = "SV depth ratio distribution",
+    subtitle = "chr10:9,102,316–9,108,300 depth / flanking anchor depth",
+    x        = "Depth ratio (SV inner / anchor)",
+    y        = "Number of individuals"
+  ) +
+  theme_minimal(base_family = "roboto_condensed") +
+  theme(panel.grid.minor = element_blank())
+
+p_hist
+
+# Organic palette
+pal_org <- c(
+  "A" = "#2a8294",
+  "B" = "#d7c83b",
+  "C" = "#a94347",
+  "D" = "#727642"
+)
+
+# Shared theme
+theme_org <- theme_minimal(base_family = "roboto_condensed") +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(colour = "black"),
+    axis.ticks = element_line(colour = "black"),
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 10, colour = "grey35"),
+    axis.title = element_text(face = "bold")
+  )
+
+# Panel A: mean +/- 95% CI + raw data
+p_pheno <- sv %>%
+  filter(!is.na(sv_ratio), !is.na(hatch_date)) %>%
+  ggplot(aes(x = sv_genotype, y = hatch_date, color = sv_genotype)) +
+  geom_jitter(
+    width = 0.06,
+    size = 1,
+    alpha = 0.8
+  ) +
+  stat_summary(
+    fun = mean,
+    geom = "point",
+    size = 3,
+    colour = "black"
+  ) +
+  stat_summary(
+    fun.data = mean_cl_normal,
+    geom = "errorbar",
+    width = 0.12,
+    linewidth = 0.7,
+    colour = "black"
+  ) +
+  scale_color_manual(
+    values = c(
+      "prim/prim" = "#2a8294",
+      "het" = "#d7c83b"
+    ),
+    guide = "none"
+  ) +
+  labs(
+    title = "Hatch date by SV genotype",
+    subtitle = "Mean with 95% CI and raw observations",
+    x = "\nSV genotype",
+    y = "Hatch date (days)\n"
+  ) +
+  theme_org
+
+# Panel B: mean +/- 95% CI + raw data
+p_focal <- sv %>%
+  filter(!is.na(sv_ratio), !is.na(hatch_date)) %>%
+  ggplot(aes(x = is_focal, y = sv_ratio, color = is_focal)) +
+  geom_jitter(
+    width = 0.06,
+    size = 1,
+    alpha = 0.8
+  ) +
+  stat_summary(
+    fun = mean,
+    geom = "point",
+    size = 3,
+    colour = "black"
+  ) +
+  stat_summary(
+    fun.data = mean_cl_normal,
+    geom = "errorbar",
+    width = 0.12,
+    linewidth = 0.7,
+    colour = "black"
+  ) +
+  scale_color_manual(
+    values = c(
+      "FALSE" = "#727642",
+      "TRUE" = "#a94347"
+    ),
+    guide = "none"
+  ) +
+  labs(
+    title = "SV ratio by focal status",
+    subtitle = "Mean with 95% CI and raw observations",
+    x = "\nFocal individual",
+    y = "SV ratio\n"
+  ) +
+  theme_org
+# Panel C: clipped reads with mean ±95% CI + raw data
+p_clips <- sv %>%
+  filter(!is.na(sv_genotype)) %>%
+  mutate(clipped_total = clipped_BP1 + clipped_BP2) %>%
+  ggplot(aes(x = sv_genotype, y = clipped_total, color = sv_genotype)) +
+
+  # raw observations
+  geom_jitter(
+    width = 0.06,
+    size = 1,
+    alpha = 0.8
+  ) +
+
+  # mean point
+  stat_summary(
+    fun = mean,
+    geom = "point",
+    size = 3,
+    colour = "black"
+  ) +
+
+  # 95% CI
+  stat_summary(
+    fun.data = mean_cl_normal,
+    geom = "errorbar",
+    width = 0.12,
+    linewidth = 0.7,
+    colour = "black"
+  ) +
+
+  scale_color_manual(
+    values = c(
+      "prim/prim" = "#2a8294",
+      "het" = "#d7c83b"
+    ),
+    guide = "none"
+  ) +
+
+  labs(
+    title = "Soft-clipped reads at SV breakpoints",
+    subtitle = "Mean clipped reads by genotype with 95% CI",
+    x = "\nSV genotype",
+    y = "Total clipped reads (BP1 + BP2)\n"
+  ) +
+
+  theme_org
+
+# Combine all three panels
+(p_focal + p_pheno + p_clips) +
+  plot_annotation(
+    title = "Structural variant associations with phenotype",
+    subtitle = "Mean estimates, 95% confidence intervals, and raw observations",
+    theme = theme(
+      plot.title = element_text(
+        family = "roboto_condensed",
+        face = "bold",
+        size = 16
+      ),
+      plot.subtitle = element_text(
+        family = "roboto_condensed",
+        size = 11
+      )
+    )
+  ) +
+  plot_layout(ncol = 3) +
+  plot_annotation(tag_levels = "a") &
+  theme(
+    plot.tag = element_text(
+      face = "bold",
+      size = 14
+    )
+  )
+
+ggsave(
+  filename = file.path(reports_path, "structural_variant", "sv_hatchdate_focal.png"),
+  width = 11, height = 6, dpi = 300
+)
+
+# contingency table
+tab_sv <- sv %>%
+  filter(!is.na(is_focal), !is.na(sv_genotype)) %>%
+  count(is_focal, sv_genotype) %>%
+  pivot_wider(
+    names_from = sv_genotype,
+    values_from = n,
+    values_fill = 0
+  )
+
+tab_sv
+```
+
+```{r sv-depth-stats}
+# ── Linear model: hatch date ~ sv genotype (controlling for family) ────────
+m_sv <- lmer(hatch_date ~ sv_genotype + (1 | FID), data = sv)
+summary(m_sv)
+
+# ANOVA-style test
+anova(m_sv)
+
+# Pairwise contrasts
+library(emmeans)
+emm <- emmeans(m_sv, ~ sv_genotype)
+pairs(emm, adjust = "bonferroni")
+```
